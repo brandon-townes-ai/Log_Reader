@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Log Reader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ── Upload Screen ─────────────────────────────────────── -->
+  <div id="upload-screen" class="screen active">
+    <canvas id="grid-canvas" aria-hidden="true"></canvas>
+    <div class="upload-content">
+
+      <div class="wordmark">
+        <span class="wm-bracket">[</span><span class="wm-text">LOG_READER</span><span class="wm-bracket">]</span>
+        <span class="wm-cursor"></span>
+      </div>
+      <div class="wordmark-sub">ROS BAG · PROCESS LOG ANALYZER</div>
+
+      <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Upload log files">
+        <div class="dz-inner">
+          <div class="dz-icon" aria-hidden="true">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 16 12 12 8 16"/>
+              <line x1="12" y1="12" x2="12" y2="21"/>
+              <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>
+            </svg>
+          </div>
+          <p class="dz-label">Drop log files here</p>
+          <p class="dz-sub">or click to browse &mdash; accepts multiple .txt files</p>
+        </div>
+        <input type="file" id="file-input" accept=".txt" multiple aria-hidden="true" tabindex="-1">
+      </div>
+
+      <div id="error-banner" class="error-banner hidden" role="alert">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span id="error-text"></span>
+        <button id="retry-btn" class="btn-ghost">RETRY</button>
+      </div>
+
+      <div id="loading-overlay" class="loading-overlay hidden" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <span class="loading-text">PARSING LOGS&hellip;</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Viewer Screen ─────────────────────────────────────── -->
+  <div id="viewer-screen" class="screen">
+
+    <header class="app-header">
+      <div class="header-left">
+        <span class="header-logo">[LOG_READER]</span>
+        <div class="header-files" id="header-files"></div>
+      </div>
+      <div class="header-right">
+        <span class="entry-count" id="entry-count" aria-live="polite">0 entries</span>
+        <button id="clear-btn" class="btn-ghost">CLEAR / UPLOAD NEW</button>
+      </div>
+    </header>
+
+    <div class="filter-bar" role="toolbar" aria-label="Log filters">
+
+      <div class="filter-group">
+        <span class="filter-label" aria-hidden="true">LEVEL</span>
+        <div class="level-pills" id="level-pills" role="group" aria-label="Level filter">
+          <button class="pill active" data-level="ALL">ALL</button>
+          <button class="pill" data-level="INFO">INFO</button>
+          <button class="pill" data-level="DEBUG">DEBUG</button>
+          <button class="pill" data-level="WARN">WARN</button>
+          <button class="pill" data-level="ERROR">ERROR</button>
+          <button class="pill" data-level="FATAL">FATAL</button>
+          <button class="pill" data-level="ALWAYS">ALWAYS</button>
+        </div>
+      </div>
+
+      <div class="filter-group">
+        <span class="filter-label" aria-hidden="true">PROCESS</span>
+        <div class="process-dropdown" id="process-dropdown">
+          <button class="dropdown-trigger" id="dropdown-trigger" aria-haspopup="listbox" aria-expanded="false">
+            <span id="dropdown-label">All processes</span>
+            <svg class="chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <div class="dropdown-menu hidden" id="dropdown-menu" role="listbox" aria-multiselectable="true"></div>
+        </div>
+      </div>
+
+      <div class="filter-group filter-group--search">
+        <span class="filter-label" aria-hidden="true">SEARCH</span>
+        <label class="search-wrap">
+          <svg class="search-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="search" id="search-input" class="search-input" placeholder="filter messages…" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+
+      <div class="filter-group filter-group--count">
+        <span class="result-count" id="result-count" aria-live="polite"></span>
+      </div>
+
+    </div>
+
+    <div id="log-container" class="log-container" role="log" aria-label="Log entries">
+      <div id="spacer-top" aria-hidden="true"></div>
+      <div id="log-rows"></div>
+      <div id="spacer-bottom" aria-hidden="true"></div>
+      <div id="empty-msg" class="empty-msg hidden">No matching entries</div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
