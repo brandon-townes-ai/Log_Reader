@@ -46,7 +46,7 @@ let allEntries      = [];
 let filteredEntries = [];
 let activeLevels    = null;   // null = ALL; else Set<string>
 let activeProcesses = null;   // null = ALL; else Set<string>
-let searchQuery     = '';
+let searchRegex     = null;   // compiled RegExp | null
 let uploadedFiles   = [];
 
 // ── Utilities ────────────────────────────────────────────────
@@ -62,11 +62,35 @@ function esc(str) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function highlight(text, q) {
-  const safe = esc(text);
-  if (!q) return safe;
-  const safeQ = esc(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return safe.replace(new RegExp(safeQ, 'gi'), m => `<mark>${m}</mark>`);
+function compileSearch(raw) {
+  const wrap = document.querySelector('.search-wrap');
+  if (!raw.trim()) {
+    searchRegex = null;
+    wrap?.classList.remove('regex-error');
+    return;
+  }
+  try {
+    searchRegex = new RegExp(raw, 'i');
+    wrap?.classList.remove('regex-error');
+  } catch {
+    searchRegex = null;
+    wrap?.classList.add('regex-error');
+  }
+}
+
+function highlight(rawText, regex) {
+  if (!regex) return esc(rawText);
+  // Build a global version of the regex to find all matches
+  const g = new RegExp(regex.source, regex.flags.replace('g', '') + 'g');
+  const parts = []; let last = 0, m;
+  while ((m = g.exec(rawText)) !== null) {
+    parts.push(esc(rawText.slice(last, m.index)));
+    parts.push(`<mark>${esc(m[0])}</mark>`);
+    last = m.index + m[0].length;
+    if (m[0].length === 0) g.lastIndex++; // guard: skip zero-length matches
+  }
+  parts.push(esc(rawText.slice(last)));
+  return parts.join('');
 }
 
 // ── Virtual Scroller ──────────────────────────────────────────
@@ -117,7 +141,6 @@ function buildRow(entry, idx) {
 
   const lvlColor  = LEVEL_COLORS[entry.level] || '#94a3b8';
   const procColor = hashColor(entry.process);
-  const q         = searchQuery.trim().toLowerCase();
   const isFatal   = entry.level === 'FATAL';
 
   let html = `<span class="tok-ts">${esc(entry.timestamp)}</span>`;
@@ -125,7 +148,7 @@ function buildRow(entry, idx) {
   html += `<span class="tok-lvl${isFatal ? ' lvl-fatal' : ''}" style="color:${lvlColor}">[${esc(entry.level)}]</span>`;
   html += `<span class="tok-mod">[${esc(entry.module)}]</span>`;
   if (entry.source) html += `<span class="tok-src">[${esc(entry.source)}]</span>`;
-  html += `<span class="tok-msg" style="color:${lvlColor}">${highlight(entry.message, q)}</span>`;
+  html += `<span class="tok-msg" style="color:${lvlColor}">${highlight(entry.message, searchRegex)}</span>`;
 
   div.innerHTML = html;
   return div;
@@ -133,12 +156,10 @@ function buildRow(entry, idx) {
 
 // ── Filters ──────────────────────────────────────────────────
 function applyFilters() {
-  const q = searchQuery.trim().toLowerCase();
-
   filteredEntries = allEntries.filter(e => {
     if (activeLevels    !== null && !activeLevels.has(e.level))     return false;
     if (activeProcesses !== null && !activeProcesses.has(e.process)) return false;
-    if (q && !e.message.toLowerCase().includes(q) && !e.raw.toLowerCase().includes(q)) return false;
+    if (searchRegex && !searchRegex.test(e.raw)) return false;
     return true;
   });
 
@@ -254,7 +275,7 @@ function loadViewer(entries) {
   filteredEntries = entries;
   activeLevels    = null;
   activeProcesses = null;
-  searchQuery     = '';
+  searchRegex     = null;
 
   // Reset UI
   document.getElementById('search-input').value = '';
@@ -486,7 +507,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('search-input').addEventListener('input', e => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
-      searchQuery = e.target.value.toLowerCase();
+      compileSearch(e.target.value);
       applyFilters();
     }, 150);
   });

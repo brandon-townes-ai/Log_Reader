@@ -421,6 +421,10 @@ html, body {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(240,180,41,.1);
 }
+.search-wrap.regex-error {
+  border-color: #f87171;
+  box-shadow: 0 0 0 2px rgba(248,113,113,.15);
+}
 .search-ico { color: var(--text-dimmer); flex-shrink: 0; }
 .search-input {
   font-family: var(--font-mono);
