@@ -1,5 +1,27 @@
 'use strict';
 
+// ── Theme ────────────────────────────────────────────────────
+const MOON_SVG = `<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>`;
+const SUN_SVG  = `<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>`;
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const isSun = theme === 'light';
+  ['upload-theme-icon','viewer-theme-icon'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = isSun ? SUN_SVG : MOON_SVG;
+  });
+  localStorage.setItem('log-reader-theme', theme);
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  applyTheme(current === 'light' ? 'dark' : 'light');
+}
+
+// Apply saved theme immediately (before DOM ready to avoid flash)
+applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
+
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
   '#38bdf8','#f472b6','#facc15','#4ade80',
@@ -162,21 +184,29 @@ function buildProcessDropdown() {
     menu.appendChild(mkItem(p, `<span style="color:${color}">${esc(p)}</span>`));
   });
 
-  menu.addEventListener('change', () => {
-    const allChk  = menu.querySelector('input[value="__ALL__"]');
+  menu.addEventListener('change', e => {
+    const allChk   = menu.querySelector('input[value="__ALL__"]');
     const procChks = [...menu.querySelectorAll('input:not([value="__ALL__"])')];
 
-    if (allChk.checked) {
-      procChks.forEach(c => { c.checked = true; });
-      activeProcesses = null;
+    if (e.target.value === '__ALL__') {
+      // "All processes" toggled — sync every process checkbox to match
+      const checked = allChk.checked;
+      procChks.forEach(c => { c.checked = checked; });
+      activeProcesses = checked ? null : null; // empty selection → treat as ALL
+      allChk.checked = true; // never allow ALL to be fully unchecked
     } else {
-      const selected = procChks.filter(c => c.checked).map(c => c.value);
-      if (selected.length === 0 || selected.length === procChks.length) {
+      // A specific process was toggled
+      const allSelected  = procChks.every(c => c.checked);
+      const noneSelected = procChks.every(c => !c.checked);
+
+      if (allSelected || noneSelected) {
+        // Back to all — reset
         procChks.forEach(c => { c.checked = true; });
         allChk.checked = true;
         activeProcesses = null;
       } else {
-        activeProcesses = new Set(selected);
+        allChk.checked = false;
+        activeProcesses = new Set(procChks.filter(c => c.checked).map(c => c.value));
       }
     }
 
@@ -267,6 +297,56 @@ function hideError() {
   document.getElementById('error-banner').classList.add('hidden');
 }
 
+// ── Folder / file drop resolution (FileSystem API) ───────────
+function fsEntryToFile(entry) {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+function readDirEntries(reader) {
+  return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+}
+
+async function collectTxtFiles(entry) {
+  if (entry.isFile) {
+    if (entry.name.endsWith('.txt')) return [await fsEntryToFile(entry)];
+    return [];
+  }
+  if (entry.isDirectory) {
+    const reader = entry.createReader();
+    const files = [];
+    // readEntries returns ≤100 results per call — loop until empty
+    while (true) {
+      const batch = await readDirEntries(reader);
+      if (!batch.length) break;
+      for (const child of batch) {
+        if (child.isFile && child.name.endsWith('.txt')) {
+          files.push(await fsEntryToFile(child));
+        }
+      }
+    }
+    return files;
+  }
+  return [];
+}
+
+async function resolveDroppedItems(dataTransfer) {
+  // Prefer FileSystem API (supports folders); fall back to .files
+  if (dataTransfer.items && dataTransfer.items.length) {
+    const files = [];
+    for (const item of dataTransfer.items) {
+      const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+      if (entry) {
+        files.push(...await collectTxtFiles(entry));
+      } else if (item.kind === 'file') {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    return files;
+  }
+  return [...dataTransfer.files];
+}
+
 // ── Upload-screen animated grid canvas ───────────────────────
 function initGridCanvas() {
   const canvas = document.getElementById('grid-canvas');
@@ -340,12 +420,17 @@ document.addEventListener('DOMContentLoaded', () => {
   ['dragleave','dragend'].forEach(ev =>
     dropZone.addEventListener(ev, () => dropZone.classList.remove('dragging'))
   );
-  dropZone.addEventListener('drop', e => {
+  dropZone.addEventListener('drop', async e => {
     e.preventDefault();
     dropZone.classList.remove('dragging');
-    handleUpload(e.dataTransfer.files);
+    const files = await resolveDroppedItems(e.dataTransfer);
+    if (files.length) handleUpload(files);
   });
   fileInput.addEventListener('change', () => handleUpload(fileInput.files));
+
+  // ── Theme toggles ──
+  document.getElementById('upload-theme-btn').addEventListener('click', toggleTheme);
+  document.getElementById('viewer-theme-btn').addEventListener('click', toggleTheme);
 
   // ── Error / clear ──
   document.getElementById('retry-btn').addEventListener('click', () => {
@@ -374,18 +459,26 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // ── Process dropdown ──
-  ddTrigger.addEventListener('click', e => {
-    e.stopPropagation();
-    const open = ddMenu.classList.toggle('hidden');  // toggle returns new state (true = hidden)
-    ddTrigger.classList.toggle('open', !open);
-    ddTrigger.setAttribute('aria-expanded', String(open === false));
-  });
-  document.addEventListener('click', () => {
+  // ── Process dropdown (fixed positioning to escape any overflow clipping) ──
+  function openDropdown() {
+    const rect = ddTrigger.getBoundingClientRect();
+    ddMenu.style.top  = `${rect.bottom + 4}px`;
+    ddMenu.style.left = `${rect.left}px`;
+    ddMenu.classList.remove('hidden');
+    ddTrigger.classList.add('open');
+    ddTrigger.setAttribute('aria-expanded', 'true');
+  }
+  function closeDropdown() {
     ddMenu.classList.add('hidden');
     ddTrigger.classList.remove('open');
     ddTrigger.setAttribute('aria-expanded', 'false');
+  }
+
+  ddTrigger.addEventListener('click', e => {
+    e.stopPropagation();
+    ddMenu.classList.contains('hidden') ? openDropdown() : closeDropdown();
   });
+  document.addEventListener('click', closeDropdown);
   ddMenu.addEventListener('click', e => e.stopPropagation());
 
   // ── Search (debounced 150 ms) ──

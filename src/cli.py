@@ -1,10 +1,11 @@
 """
 Usage:
-    python -m src.cli <file> [file2 ...] [--level LEVEL] [--search TEXT] [--process NAME]
+    python -m src.cli <file|dir> [file2|dir2 ...] [--level LEVEL] [--search TEXT] [--process NAME]
 """
 import argparse
 import hashlib
 import sys
+from pathlib import Path
 
 from rich.console import Console
 from rich.text import Text
@@ -59,8 +60,20 @@ def main():
     parser.add_argument("--process", help="Only show lines from this process")
     args = parser.parse_args()
 
+    # Expand any directory args to all .txt files inside them
+    resolved = []
+    for arg in args.files:
+        p = Path(arg)
+        if p.is_dir():
+            txt_files = sorted(p.glob("*.txt"))
+            if not txt_files:
+                console.print(f"[yellow]No .txt files found in:[/yellow] {arg}", err=True)
+            resolved.extend(str(f) for f in txt_files)
+        else:
+            resolved.append(arg)
+
     groups = []
-    for path in args.files:
+    for path in resolved:
         try:
             groups.append(parse_file(path))
         except FileNotFoundError:

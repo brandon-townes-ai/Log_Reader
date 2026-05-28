@@ -2,20 +2,39 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:          #0d1117;
-  --surface:     #161b22;
-  --surface2:    #1c2128;
-  --border:      #30363d;
-  --border-dim:  #21262d;
-  --text:        #e6edf3;
-  --text-dim:    #8b949e;
-  --text-dimmer: #484f58;
-  --accent:      #f0b429;       /* amber — primary accent */
-  --accent-dim:  rgba(240,180,41,.12);
-  --cyan:        #67e8f9;
-  --font-mono:   'JetBrains Mono', 'Share Tech Mono', 'Fira Code', monospace;
-  --font-display:'Share Tech Mono', 'JetBrains Mono', monospace;
-  --row-h:       22px;
+  --bg:           #0d1117;
+  --surface:      #161b22;
+  --surface2:     #1c2128;
+  --border:       #30363d;
+  --border-dim:   #21262d;
+  --text:         #e6edf3;
+  --text-dim:     #8b949e;
+  --text-dimmer:  #484f58;
+  --accent:       #f0b429;
+  --accent-dim:   rgba(240,180,41,.12);
+  --cyan:         #67e8f9;
+  --row-even-bg:  #0a0a0e;
+  --row-odd-bg:   #0d1117;
+  --row-hover-bg: #1a2030;
+  --font-mono:    'JetBrains Mono', 'Share Tech Mono', 'Fira Code', monospace;
+  --font-display: 'Share Tech Mono', 'JetBrains Mono', monospace;
+  --row-h:        22px;
+}
+
+[data-theme="light"] {
+  --bg:           #f6f8fa;
+  --surface:      #ffffff;
+  --surface2:     #eaeef2;
+  --border:       #d0d7de;
+  --border-dim:   #e1e4e8;
+  --text:         #1f2328;
+  --text-dim:     #57606a;
+  --text-dimmer:  #8c959f;
+  --accent:       #c17d10;
+  --accent-dim:   rgba(193,125,16,.1);
+  --row-even-bg:  #f6f8fa;
+  --row-odd-bg:   #ffffff;
+  --row-hover-bg: #dce7f5;
 }
 
 html, body {
@@ -264,11 +283,11 @@ html, body {
   padding: 0 16px;
   background: var(--surface2);
   border-bottom: 1px solid var(--border-dim);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
+  /* overflow must stay visible so the process dropdown menu can escape below */
+  overflow: visible;
+  position: relative;
+  z-index: 50;
 }
-.filter-bar::-webkit-scrollbar { display: none; }
 
 .filter-group {
   display: flex;
@@ -351,8 +370,8 @@ html, body {
 .dropdown-trigger.open .chevron { transform: rotate(180deg); }
 
 .dropdown-menu {
-  position: absolute;
-  top: calc(100% + 6px);
+  position: fixed;
+  top: 0;
   left: 0;
   min-width: 240px;
   max-height: 280px;
@@ -361,7 +380,7 @@ html, body {
   border: 1px solid var(--border);
   border-radius: 4px;
   box-shadow: 0 8px 24px rgba(0,0,0,.5);
-  z-index: 100;
+  z-index: 200;
   animation: fadeDown .12s ease;
 }
 .dropdown-menu::-webkit-scrollbar { width: 4px; }
@@ -453,10 +472,10 @@ html, body {
   transition: background .08s;
   gap: 0;
 }
-.row-even { background: #0a0a0e; }
-.row-odd  { background: #0d1117; }
+.row-even { background: var(--row-even-bg); }
+.row-odd  { background: var(--row-odd-bg); }
 .log-row:hover {
-  background: #1a2030 !important;
+  background: var(--row-hover-bg) !important;
   white-space: pre-wrap;
   height: auto;
   min-height: var(--row-h);
@@ -513,6 +532,30 @@ mark {
   white-space: nowrap;
 }
 .btn-ghost:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+
+.theme-toggle {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+  flex-shrink: 0;
+}
+.theme-toggle:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+
+/* Upload screen toggle — top-right corner */
+.upload-theme-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 10;
+}
 
 /* ── Utility ────────────────────────────────────────────────── */
 .hidden { display: none !important; }

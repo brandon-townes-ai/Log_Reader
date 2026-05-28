@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -27,12 +28,11 @@ async def upload_logs(files: list[UploadFile] = File(...)):
             text = raw.decode("utf-8", errors="replace")
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Could not decode {f.filename}: {exc}")
-        entries = parse_text(text)
-        for e in entries:
-            e.process = e.process  # file name not needed; process field is self-contained
+        # Run CPU-bound parsing off the event loop
+        entries = await asyncio.to_thread(parse_text, text)
         groups.append(entries)
 
-    merged = merge_and_sort(groups)
+    merged = await asyncio.to_thread(merge_and_sort, groups)
     return entries_to_json(merged)
 
 
