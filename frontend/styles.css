@@ -583,8 +583,10 @@ mark {
   letter-spacing: .08em;
   color: var(--text-dimmer);
   z-index: 10;
-  pointer-events: none;
+  text-decoration: none;
+  transition: color .15s;
 }
+.footer-credit:hover { color: var(--accent); }
 
 /* Upload screen toggle — top-right corner */
 .upload-theme-toggle {
