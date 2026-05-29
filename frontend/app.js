@@ -22,6 +22,9 @@ function toggleTheme() {
 // Apply saved theme immediately (before DOM ready to avoid flash)
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
+// ── Version ──────────────────────────────────────────────────
+const VERSION = 'v1.0.0';
+
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
   '#38bdf8','#f472b6','#facc15','#4ade80',
@@ -683,59 +686,71 @@ async function resolveDroppedItems(dataTransfer) {
   return [...dataTransfer.files];
 }
 
-// ── Upload-screen animated grid canvas ───────────────────────
+// ── Upload-screen matrix rain canvas ─────────────────────────
 function initGridCanvas() {
   const canvas = document.getElementById('grid-canvas');
   if (!canvas) return;
-  const ctx    = canvas.getContext('2d');
-  const CELL   = 48;
-  let t        = 0;
+  const ctx   = canvas.getContext('2d');
+  const FS    = 14;
+  const CHARS = 'ABCDEF0123456789[]{}|/\\:.-_=+><@#! ';
+  let drops   = [];
+  let animId  = null;
 
   function resize() {
     canvas.width  = window.innerWidth;
     canvas.height = window.innerHeight;
+    const n = Math.floor(canvas.width / FS);
+    while (drops.length < n) drops.push(-Math.floor(Math.random() * (canvas.height / FS)));
+    drops.length = n;
   }
 
   function draw() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const cols = Math.ceil(canvas.width  / CELL) + 1;
-    const rows = Math.ceil(canvas.height / CELL) + 1;
+    const light = document.documentElement.getAttribute('data-theme') === 'light';
+    // Semi-transparent fill creates the fading trail effect
+    ctx.fillStyle = light ? 'rgba(246,248,250,0.08)' : 'rgba(13,17,23,0.08)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const d = Math.hypot(c - cols/2, r - rows/2);
-        const pulse = (Math.sin(d * .45 - t * 1.4) + 1) / 2;
-        const alpha = pulse * .18 + .03;
-        ctx.beginPath();
-        ctx.arc(c * CELL, r * CELL, 1, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(240,180,41,${alpha})`;
-        ctx.fill();
+    ctx.font = `${FS - 1}px 'JetBrains Mono', monospace`;
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = light ? 'rgba(155,95,5,0.9)' : 'rgba(255,215,90,0.9)';
+
+    for (let i = 0; i < drops.length; i++) {
+      if (drops[i] < 0) { drops[i] += 0.25; continue; }
+      ctx.fillText(CHARS[Math.random() * CHARS.length | 0], i * FS, drops[i] * FS);
+      drops[i] += 0.25 + Math.random() * 0.15;
+      if (drops[i] * FS > canvas.height + FS * 4 && Math.random() > 0.975) {
+        drops[i] = -Math.floor(Math.random() * 22);
       }
     }
 
-    t += 0.016;
     if (document.getElementById('upload-screen').classList.contains('active')) {
-      requestAnimationFrame(draw);
+      animId = requestAnimationFrame(draw);
+    } else {
+      animId = null;
     }
   }
 
-  window.addEventListener('resize', resize);
+  window.addEventListener('resize', () => {
+    resize();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  });
   resize();
 
-  // Restart animation whenever upload screen becomes visible
+  const screen = document.getElementById('upload-screen');
   const observer = new MutationObserver(() => {
-    if (document.getElementById('upload-screen').classList.contains('active')) {
-      t = 0;
-      requestAnimationFrame(draw);
+    if (screen.classList.contains('active')) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!animId) animId = requestAnimationFrame(draw);
     }
   });
-  observer.observe(document.getElementById('upload-screen'), { attributes: true, attributeFilter: ['class'] });
-  draw();
+  observer.observe(screen, { attributes: true, attributeFilter: ['class'] });
+  animId = requestAnimationFrame(draw);
 }
 
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   initGridCanvas();
+  document.getElementById('version-tag').textContent = VERSION;
 
   const dropZone    = document.getElementById('drop-zone');
   const fileInput   = document.getElementById('file-input');

@@ -559,6 +559,33 @@ mark {
 }
 .theme-toggle:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
 
+/* Version tag — bottom-left of upload screen */
+.version-tag {
+  position: fixed;
+  bottom: 16px;
+  left: 20px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .12em;
+  color: var(--text-dimmer);
+  z-index: 10;
+  text-decoration: none;
+  transition: color .15s;
+}
+.version-tag:hover { color: var(--accent); }
+
+.footer-credit {
+  position: fixed;
+  bottom: 16px;
+  right: 20px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  color: var(--text-dimmer);
+  z-index: 10;
+  pointer-events: none;
+}
+
 /* Upload screen toggle — top-right corner */
 .upload-theme-toggle {
   position: fixed;
