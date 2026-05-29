@@ -44,9 +44,17 @@ const BUFFER  = 20;  // extra rows above/below viewport
 // ── State ─────────────────────────────────────────────────────
 let allEntries      = [];
 let filteredEntries = [];
+let displayRows     = [];     // [{entry, count, groupId?}] — what the scroller iterates
 let activeLevels    = null;   // null = ALL; else Set<string>
 let activeProcesses = null;   // null = ALL; else Set<string>
 let searchRegex     = null;   // compiled RegExp | null
+let excludeRegex    = null;   // compiled RegExp | null
+let rangeStart      = null;   // epoch ms | null
+let rangeEnd        = null;   // epoch ms | null
+let collapseRepeats = false;
+let expandedGroups  = new Set();
+let tStart          = 0;      // dataset time bounds (epoch ms)
+let tEnd            = 0;
 let uploadedFiles   = [];
 
 // ── Utilities ────────────────────────────────────────────────
@@ -62,19 +70,21 @@ function esc(str) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function compileSearch(raw) {
-  const wrap = document.querySelector('.search-wrap');
+// WARNING and WARN are the same severity; canonicalize so filters/pills line up
+function canonLevel(lv) { return lv === 'WARNING' ? 'WARN' : lv; }
+
+function compileRegex(raw, wrap) {
   if (!raw.trim()) {
-    searchRegex = null;
     wrap?.classList.remove('regex-error');
-    return;
+    return null;
   }
   try {
-    searchRegex = new RegExp(raw, 'i');
+    const r = new RegExp(raw, 'i');
     wrap?.classList.remove('regex-error');
+    return r;
   } catch {
-    searchRegex = null;
     wrap?.classList.add('regex-error');
+    return null;
   }
 }
 
@@ -107,7 +117,7 @@ function renderRows() {
   const rowsEl    = document.getElementById('log-rows');
   const emptyMsg  = document.getElementById('empty-msg');
 
-  const total = filteredEntries.length;
+  const total = displayRows.length;
 
   emptyMsg.classList.toggle('hidden', total > 0 || allEntries.length === 0);
 
@@ -128,16 +138,19 @@ function renderRows() {
 
   const frag = document.createDocumentFragment();
   for (let i = startIdx; i < endIdx; i++) {
-    frag.appendChild(buildRow(filteredEntries[i], i));
+    frag.appendChild(buildRow(displayRows[i], i));
   }
 
   rowsEl.textContent = '';
   rowsEl.appendChild(frag);
 }
 
-function buildRow(entry, idx) {
+function buildRow(row, idx) {
+  const entry = row.entry;
   const div = document.createElement('div');
   div.className = `log-row ${idx % 2 === 0 ? 'row-even' : 'row-odd'}`;
+  div.dataset.i = idx;
+  if (row.count > 1) div.classList.add('is-group');
 
   const lvlColor  = LEVEL_COLORS[entry.level] || '#94a3b8';
   const procColor = hashColor(entry.process);
@@ -149,23 +162,73 @@ function buildRow(entry, idx) {
   html += `<span class="tok-mod">[${esc(entry.module)}]</span>`;
   if (entry.source) html += `<span class="tok-src">[${esc(entry.source)}]</span>`;
   html += `<span class="tok-msg" style="color:${lvlColor}">${highlight(entry.message, searchRegex)}</span>`;
+  if (row.count > 1) html += `<span class="dup-badge" data-group="${row.groupId}">×${row.count} ⊕</span>`;
 
   div.innerHTML = html;
   return div;
 }
 
+// Transform filteredEntries → displayRows, folding consecutive identical runs when enabled
+function buildDisplayRows() {
+  displayRows = [];
+  if (!collapseRepeats) {
+    for (const e of filteredEntries) displayRows.push({ entry: e, count: 1 });
+    return;
+  }
+  let i = 0, gid = 0;
+  while (i < filteredEntries.length) {
+    const e = filteredEntries[i];
+    let j = i + 1;
+    while (j < filteredEntries.length &&
+           filteredEntries[j].process === e.process &&
+           filteredEntries[j].level   === e.level &&
+           filteredEntries[j].message === e.message) j++;
+    const count = j - i;
+    if (count > 1) {
+      const groupId = `g${gid++}`;
+      if (expandedGroups.has(groupId)) {
+        for (let k = i; k < j; k++) displayRows.push({ entry: filteredEntries[k], count: 1 });
+      } else {
+        displayRows.push({ entry: e, count, groupId });
+      }
+    } else {
+      displayRows.push({ entry: e, count: 1 });
+    }
+    i = j;
+  }
+}
+
 // ── Filters ──────────────────────────────────────────────────
 function applyFilters() {
+  expandedGroups.clear();  // group ids shift when the filtered set changes
+
   filteredEntries = allEntries.filter(e => {
-    if (activeLevels    !== null && !activeLevels.has(e.level))     return false;
-    if (activeProcesses !== null && !activeProcesses.has(e.process)) return false;
-    if (searchRegex && !searchRegex.test(e.raw)) return false;
+    if (activeLevels    !== null && !activeLevels.has(canonLevel(e.level))) return false;
+    if (activeProcesses !== null && !activeProcesses.has(e.process))        return false;
+    if (rangeStart !== null && (e._t < rangeStart || e._t > rangeEnd))      return false;
+    if (searchRegex  && !searchRegex.test(e.raw))  return false;
+    if (excludeRegex &&  excludeRegex.test(e.raw)) return false;
     return true;
   });
 
+  buildDisplayRows();
   updateResultCount();
+  renderScrollMarkers();
   document.getElementById('log-container').scrollTop = 0;
   renderRows();
+}
+
+function toggleLevel(lv) {
+  if (lv === 'ALL') {
+    activeLevels = null;
+  } else if (activeLevels === null) {
+    activeLevels = new Set([lv]);
+  } else {
+    activeLevels.has(lv) ? activeLevels.delete(lv) : activeLevels.add(lv);
+    if (activeLevels.size === 0) activeLevels = null;
+  }
+  syncLevelPills();
+  applyFilters();
 }
 
 function updateResultCount() {
@@ -173,6 +236,234 @@ function updateResultCount() {
   el.textContent = filteredEntries.length < allEntries.length
     ? `${filteredEntries.length.toLocaleString()} / ${allEntries.length.toLocaleString()} shown`
     : '';
+}
+
+// ── Time helpers ─────────────────────────────────────────────
+function fmtClock(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function fmtDuration(ms) {
+  const s = Math.round(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}h ${m}m ${sec}s` : m ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+// ── Stats Bar ────────────────────────────────────────────────
+function renderStats() {
+  const bar = document.getElementById('stats-bar');
+  bar.innerHTML = '';
+  if (!allEntries.length) return;
+
+  const levelCounts = {};
+  const procCounts  = {};
+  for (const e of allEntries) {
+    const lv = canonLevel(e.level);
+    levelCounts[lv] = (levelCounts[lv] || 0) + 1;
+    procCounts[e.process] = (procCounts[e.process] || 0) + 1;
+  }
+
+  const frag = document.createDocumentFragment();
+  const sep = () => { const s = document.createElement('span'); s.className = 'stat-sep'; s.textContent = '·'; return s; };
+
+  // Per-level chips (severity order), clickable to filter
+  const order = ['FATAL', 'ERROR', 'WARN', 'INFO', 'DEBUG', 'ALWAYS'];
+  let first = true;
+  order.forEach(lv => {
+    if (!levelCounts[lv]) return;
+    if (!first) frag.appendChild(sep());
+    first = false;
+    const chip = document.createElement('span');
+    chip.className = 'stat-chip stat-chip--level';
+    chip.title = `Filter ${lv}`;
+    chip.innerHTML =
+      `<span class="stat-dot" style="background:${LEVEL_COLORS[lv] || '#94a3b8'}"></span>` +
+      `<span class="stat-label">${lv}</span>` +
+      `<span class="stat-val">${levelCounts[lv].toLocaleString()}</span>`;
+    chip.addEventListener('click', () => toggleLevel(lv));
+    frag.appendChild(chip);
+  });
+
+  // Time span
+  frag.appendChild(sep());
+  const span = document.createElement('span');
+  span.className = 'stat-chip';
+  span.innerHTML =
+    `<span class="stat-label">SPAN</span>` +
+    `<span class="stat-val">${fmtClock(tStart)}→${fmtClock(tEnd)} (${fmtDuration(tEnd - tStart)})</span>`;
+  frag.appendChild(span);
+
+  // Top noisiest processes
+  const top = Object.entries(procCounts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  if (top.length) {
+    frag.appendChild(sep());
+    const noisy = document.createElement('span');
+    noisy.className = 'stat-chip';
+    noisy.innerHTML = `<span class="stat-label">TOP</span>`;
+    top.forEach(([p, c]) => {
+      const el = document.createElement('span');
+      el.className = 'stat-val stat-proc';
+      el.style.color = hashColor(p);
+      el.title = `Filter to ${p}`;
+      el.textContent = `${p} ${c.toLocaleString()}`;
+      el.addEventListener('click', () => focusProcess(p));
+      noisy.appendChild(el);
+      noisy.appendChild(document.createTextNode(' '));
+    });
+    frag.appendChild(noisy);
+  }
+
+  bar.appendChild(frag);
+}
+
+// Narrow the process filter to a single process (used by stats links)
+function focusProcess(p) {
+  activeProcesses = new Set([p]);
+  const menu = document.getElementById('dropdown-menu');
+  menu.querySelectorAll('input').forEach(c => {
+    c.checked = c.value === '__ALL__' ? false : c.value === p;
+  });
+  syncDropdownLabel();
+  applyFilters();
+}
+
+// ── Timeline histogram ───────────────────────────────────────
+function renderTimeline() {
+  const canvas = document.getElementById('timeline-canvas');
+  const barEl  = document.getElementById('timeline-bar');
+  if (!canvas || !barEl || !allEntries.length || tEnd <= tStart) return;
+
+  const w = barEl.clientWidth, h = barEl.clientHeight;
+  if (!w || !h) return;
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  const nb = Math.max(1, Math.floor(w));   // ~1px buckets
+  const span = tEnd - tStart;
+  const buckets = Array.from({ length: nb }, () => ({ info: 0, warn: 0, err: 0 }));
+
+  for (const e of allEntries) {
+    let b = Math.floor(((e._t - tStart) / span) * nb);
+    if (b < 0) b = 0; else if (b >= nb) b = nb - 1;
+    const lv = canonLevel(e.level);
+    if (lv === 'ERROR' || lv === 'FATAL')     buckets[b].err++;
+    else if (lv === 'WARN')                   buckets[b].warn++;
+    else                                      buckets[b].info++;
+  }
+
+  let max = 1;
+  for (const bk of buckets) max = Math.max(max, bk.info + bk.warn + bk.err);
+
+  const dim = getComputedStyle(document.documentElement)
+    .getPropertyValue('--text-dimmer').trim() || '#484f58';
+
+  for (let i = 0; i < nb; i++) {
+    const bk = buckets[i];
+    if (!(bk.info + bk.warn + bk.err)) continue;
+    let y = h;
+    const seg = (count, color) => {
+      if (!count) return;
+      const sh = (count / max) * h;
+      ctx.fillStyle = color;
+      ctx.fillRect(i, y - sh, 1, sh);
+      y -= sh;
+    };
+    seg(bk.info, dim);
+    seg(bk.warn, LEVEL_COLORS.WARN);
+    seg(bk.err,  LEVEL_COLORS.ERROR);
+  }
+}
+
+function jumpToTime(t) {
+  if (!displayRows.length) return;
+  let idx = displayRows.findIndex(r => r.entry._t >= t);
+  if (idx < 0) idx = displayRows.length - 1;
+  document.getElementById('log-container').scrollTop = idx * ROW_H;
+}
+
+// ── Scrollbar error markers ──────────────────────────────────
+function renderScrollMarkers() {
+  const rail = document.getElementById('scroll-markers');
+  if (!rail) return;
+  rail.innerHTML = '';
+  const total = displayRows.length;
+  if (!total) return;
+
+  const frag = document.createDocumentFragment();
+  const seen = new Set();
+  for (let i = 0; i < total; i++) {
+    const lv = canonLevel(displayRows[i].entry.level);
+    let color = null;
+    if (lv === 'ERROR' || lv === 'FATAL') color = LEVEL_COLORS.ERROR;
+    else if (lv === 'WARN')               color = LEVEL_COLORS.WARN;
+    if (!color) continue;
+    const pct = Math.round((i / total) * 1000) / 10;  // 0.1% buckets cap DOM size
+    const key = color + pct;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const tick = document.createElement('div');
+    tick.className = 'scroll-marker';
+    tick.style.top = pct + '%';
+    tick.style.background = color;
+    frag.appendChild(tick);
+  }
+  rail.appendChild(frag);
+}
+
+// ── Time-range readout ───────────────────────────────────────
+function showRangeReadout() {
+  const box = document.getElementById('timeline-range');
+  const txt = document.getElementById('range-text');
+  if (rangeStart === null) { box.classList.add('hidden'); return; }
+  txt.textContent = `${fmtClock(rangeStart)} → ${fmtClock(rangeEnd)}`;
+  box.classList.remove('hidden');
+}
+
+function clearRange() {
+  rangeStart = rangeEnd = null;
+  document.querySelector('.timeline-selection')?.remove();
+  showRangeReadout();
+  applyFilters();
+}
+
+// ── Inspector panel ──────────────────────────────────────────
+function openInspector(entry) {
+  const body = document.getElementById('inspector-body');
+  const fields = [
+    ['Timestamp', entry.timestamp],
+    ['Process',   entry.process],
+    ['Level',     entry.level],
+    ['Module',    entry.module],
+    ['Source',    entry.source || '—'],
+    ['Line #',    entry.line_number],
+    ['Message',   entry.message],
+  ];
+  let html = fields.map(([k, v]) =>
+    `<div class="insp-field"><div class="insp-key">${esc(k)}</div>` +
+    `<div class="insp-val">${esc(String(v))}</div></div>`
+  ).join('');
+  html += `<button class="insp-copy" id="insp-copy">COPY RAW</button>`;
+  body.innerHTML = html;
+
+  // color the process value to match the row
+  const procVal = body.querySelectorAll('.insp-val')[1];
+  if (procVal) procVal.style.color = hashColor(entry.process);
+
+  document.getElementById('insp-copy').addEventListener('click', () => {
+    navigator.clipboard?.writeText(entry.raw);
+    const btn = document.getElementById('insp-copy');
+    btn.textContent = 'COPIED ✓';
+    setTimeout(() => { btn.textContent = 'COPY RAW'; }, 1200);
+  });
+
+  document.getElementById('inspector').classList.remove('hidden');
+}
+
+function closeInspector() {
+  document.getElementById('inspector').classList.add('hidden');
 }
 
 // ── Level Pills ──────────────────────────────────────────────
@@ -271,17 +562,41 @@ async function handleUpload(files) {
 }
 
 function loadViewer(entries) {
+  // Precompute numeric epoch-ms per entry + dataset bounds (Feature 0)
+  for (const e of entries) {
+    e._t = Date.parse(e.timestamp.slice(0, 23).replace(' ', 'T'));
+  }
+  tStart = entries.length ? entries[0]._t : 0;
+  tEnd   = entries.length ? entries[0]._t : 0;
+  for (const e of entries) {
+    if (e._t < tStart) tStart = e._t;
+    if (e._t > tEnd)   tEnd   = e._t;
+  }
+
   allEntries      = entries;
   filteredEntries = entries;
   activeLevels    = null;
   activeProcesses = null;
   searchRegex     = null;
+  excludeRegex    = null;
+  rangeStart      = rangeEnd = null;
+  collapseRepeats = false;
+  expandedGroups.clear();
 
   // Reset UI
   document.getElementById('search-input').value = '';
+  document.getElementById('exclude-input').value = '';
+  document.getElementById('collapse-toggle').classList.remove('active');
+  document.getElementById('collapse-toggle').setAttribute('aria-pressed', 'false');
+  document.querySelector('.timeline-selection')?.remove();
+  showRangeReadout();
+  closeInspector();
   syncLevelPills();
   buildProcessDropdown();
+  buildDisplayRows();
   updateResultCount();
+  renderStats();
+  renderScrollMarkers();
 
   document.getElementById('header-files').textContent =
     uploadedFiles.map(f => f.name).join('  ·  ');
@@ -295,7 +610,7 @@ function loadViewer(entries) {
 function showViewer() {
   document.getElementById('upload-screen').classList.remove('active');
   document.getElementById('viewer-screen').classList.add('active');
-  requestAnimationFrame(renderRows);
+  requestAnimationFrame(() => { renderRows(); renderTimeline(); });
 }
 
 function showUpload() {
@@ -463,21 +778,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Level pills ──
   document.querySelectorAll('#level-pills .pill').forEach(pill => {
-    pill.addEventListener('click', () => {
-      const lv = pill.dataset.level;
-      if (lv === 'ALL') {
-        activeLevels = null;
-      } else {
-        if (activeLevels === null) {
-          activeLevels = new Set([lv]);
-        } else {
-          activeLevels.has(lv) ? activeLevels.delete(lv) : activeLevels.add(lv);
-          if (activeLevels.size === 0) activeLevels = null;
-        }
-      }
-      syncLevelPills();
-      applyFilters();
-    });
+    pill.addEventListener('click', () => toggleLevel(pill.dataset.level));
   });
 
   // ── Process dropdown (fixed positioning to escape any overflow clipping) ──
@@ -502,17 +803,113 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('click', closeDropdown);
   ddMenu.addEventListener('click', e => e.stopPropagation());
 
-  // ── Search (debounced 150 ms) ──
+  // ── Search + exclude (debounced 150 ms) ──
   let searchTimer;
   document.getElementById('search-input').addEventListener('input', e => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
-      compileSearch(e.target.value);
+      searchRegex = compileRegex(e.target.value, e.target.closest('.search-wrap'));
+      applyFilters();
+    }, 150);
+  });
+  let excludeTimer;
+  document.getElementById('exclude-input').addEventListener('input', e => {
+    clearTimeout(excludeTimer);
+    excludeTimer = setTimeout(() => {
+      excludeRegex = compileRegex(e.target.value, e.target.closest('.search-wrap'));
       applyFilters();
     }, 150);
   });
 
-  // ── Virtual scroll ──
+  // ── Collapse repeats toggle ──
+  const collapseBtn = document.getElementById('collapse-toggle');
+  collapseBtn.addEventListener('click', () => {
+    collapseRepeats = !collapseRepeats;
+    collapseBtn.classList.toggle('active', collapseRepeats);
+    collapseBtn.setAttribute('aria-pressed', String(collapseRepeats));
+    expandedGroups.clear();
+    buildDisplayRows();
+    renderScrollMarkers();
+    logContainer.scrollTop = 0;
+    renderRows();
+  });
+
+  // ── Log rows: click to inspect, or expand a collapsed group ──
+  const logRows = document.getElementById('log-rows');
+  logRows.addEventListener('click', e => {
+    const badge = e.target.closest('.dup-badge');
+    if (badge) {
+      expandedGroups.add(badge.dataset.group);
+      buildDisplayRows();
+      renderScrollMarkers();
+      renderRows();
+      return;
+    }
+    const rowEl = e.target.closest('.log-row');
+    if (!rowEl) return;
+    const row = displayRows[+rowEl.dataset.i];
+    if (row) openInspector(row.entry);
+  });
+
+  // ── Inspector close ──
+  document.getElementById('inspector-close').addEventListener('click', closeInspector);
+
+  // ── Timeline brush (drag = range select, click = jump) ──
+  const tlBar   = document.getElementById('timeline-bar');
+  const tlBrush = document.getElementById('timeline-brush');
+  let down = false, x0 = 0, moved = false, selEl = null;
+
+  tlBrush.addEventListener('mousedown', e => {
+    if (!allEntries.length) return;
+    down = true; moved = false;
+    const rect = tlBrush.getBoundingClientRect();
+    x0 = e.clientX - rect.left;
+    document.querySelector('.timeline-selection')?.remove();
+    selEl = document.createElement('div');
+    selEl.className = 'timeline-selection';
+    selEl.style.left = x0 + 'px';
+    selEl.style.width = '0px';
+    tlBar.appendChild(selEl);
+  });
+  window.addEventListener('mousemove', e => {
+    if (!down) return;
+    const rect = tlBrush.getBoundingClientRect();
+    let x1 = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+    if (Math.abs(x1 - x0) > 3) moved = true;
+    if (selEl) {
+      selEl.style.left  = Math.min(x0, x1) + 'px';
+      selEl.style.width = Math.abs(x1 - x0) + 'px';
+    }
+  });
+  window.addEventListener('mouseup', e => {
+    if (!down) return;
+    down = false;
+    const rect = tlBrush.getBoundingClientRect();
+    const x1 = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+    const span = tEnd - tStart;
+    if (!moved) {
+      selEl?.remove(); selEl = null;
+      jumpToTime(tStart + (x0 / rect.width) * span);
+      return;
+    }
+    const a = Math.min(x0, x1) / rect.width;
+    const b = Math.max(x0, x1) / rect.width;
+    rangeStart = tStart + a * span;
+    rangeEnd   = tStart + b * span;
+    showRangeReadout();
+    applyFilters();
+  });
+  document.getElementById('range-clear').addEventListener('click', clearRange);
+
+  // ── Keyboard: Esc closes inspector / dropdown ──
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      closeInspector();
+      closeDropdown();
+    }
+  });
+
+  // ── Virtual scroll + responsive timeline ──
   logContainer.addEventListener('scroll', scheduleRender, { passive: true });
-  window.addEventListener('resize', scheduleRender, { passive: true });
+  window.addEventListener('resize', () => { scheduleRender(); renderTimeline(); }, { passive: true });
 });
