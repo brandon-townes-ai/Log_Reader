@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, asdict
 
-_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\[\d[0-9;]*m')
 
 _ENTRY_RE = re.compile(
     r'^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)'

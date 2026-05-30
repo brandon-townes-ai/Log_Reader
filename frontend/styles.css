@@ -486,12 +486,6 @@ html, body {
 .row-odd  { background: var(--row-odd-bg); }
 .log-row:hover {
   background: var(--row-hover-bg) !important;
-  white-space: pre-wrap;
-  height: auto;
-  min-height: var(--row-h);
-  z-index: 10;
-  box-shadow: 0 2px 12px rgba(0,0,0,.6);
-  overflow: visible;
 }
 
 /* Log tokens */
@@ -501,12 +495,6 @@ html, body {
 .tok-mod  { color: #c084fc; flex-shrink: 0; margin-right: 0; }
 .tok-src  { color: #67e8f9; flex-shrink: 0; margin-right: 0; }
 .tok-msg  { margin-left: 6px; overflow: hidden; text-overflow: ellipsis; }
-.log-row:hover .tok-msg {
-  overflow: visible;
-  text-overflow: clip;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
 
 /* FATAL bold */
 .lvl-fatal { font-weight: 700; }
