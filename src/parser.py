@@ -1,6 +1,8 @@
 import re
 from dataclasses import dataclass, asdict
 
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
 _ENTRY_RE = re.compile(
     r'^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)'
     r'\[(?P<process>[^\]]+)\]'
@@ -25,6 +27,7 @@ class LogEntry:
 
 
 def parse_line(line: str, line_number: int) -> LogEntry | None:
+    line = _ANSI_RE.sub('', line)
     m = _ENTRY_RE.match(line)
     if not m:
         return None
@@ -55,7 +58,9 @@ def parse_text(text: str) -> list[LogEntry]:
             last = entry
         elif last is not None and line.strip():
             # continuation — append to previous entry's message
-            last.message = (last.message + "\n" + line.rstrip()).strip()
+            cleaned = _ANSI_RE.sub('', line).rstrip()
+            if cleaned.strip():
+                last.message = (last.message + "\n" + cleaned).strip()
 
     return entries
 

@@ -107,7 +107,10 @@ function highlight(rawText, regex) {
 }
 
 // ── Virtual Scroller ──────────────────────────────────────────
-let rafId = null;
+let rafId         = null;
+let renderedStart = 0;
+let renderedEnd   = 0;
+let rowsDirty     = false;  // true when displayRows content changed — forces full rebuild
 
 function scheduleRender() {
   if (!rafId) rafId = requestAnimationFrame(() => { rafId = null; renderRows(); });
@@ -127,25 +130,55 @@ function renderRows() {
   if (total === 0) {
     spacerTop.style.height = '0';
     spacerBot.style.height = '0';
-    rowsEl.innerHTML = '';
+    rowsEl.textContent = '';
+    renderedStart = renderedEnd = 0;
+    rowsDirty = false;
     return;
   }
 
-  const scrollTop     = container.scrollTop;
-  const clientHeight  = container.clientHeight;
-  const startIdx = Math.max(0,     Math.floor(scrollTop / ROW_H) - BUFFER);
-  const endIdx   = Math.min(total, Math.ceil((scrollTop + clientHeight) / ROW_H) + BUFFER);
+  const scrollTop    = container.scrollTop;
+  const clientHeight = container.clientHeight;
+  const newStart = Math.max(0,     Math.floor(scrollTop / ROW_H) - BUFFER);
+  const newEnd   = Math.min(total, Math.ceil((scrollTop + clientHeight) / ROW_H) + BUFFER);
 
-  spacerTop.style.height = `${startIdx * ROW_H}px`;
-  spacerBot.style.height = `${(total - endIdx) * ROW_H}px`;
+  spacerTop.style.height = `${newStart * ROW_H}px`;
+  spacerBot.style.height = `${(total - newEnd) * ROW_H}px`;
 
-  const frag = document.createDocumentFragment();
-  for (let i = startIdx; i < endIdx; i++) {
-    frag.appendChild(buildRow(displayRows[i], i));
+  const noOverlap = newEnd <= renderedStart || newStart >= renderedEnd;
+
+  if (rowsDirty || noOverlap) {
+    // Full rebuild — data changed or viewport jumped past rendered range
+    rowsDirty = false;
+    const frag = document.createDocumentFragment();
+    for (let i = newStart; i < newEnd; i++) frag.appendChild(buildRow(displayRows[i], i));
+    rowsEl.textContent = '';
+    rowsEl.appendChild(frag);
+    renderedStart = newStart;
+    renderedEnd   = newEnd;
+    return;
   }
 
-  rowsEl.textContent = '';
-  rowsEl.appendChild(frag);
+  // Incremental update — only touch rows entering/leaving the viewport
+  while (renderedStart < newStart && rowsEl.firstChild) {
+    rowsEl.removeChild(rowsEl.firstChild);
+    renderedStart++;
+  }
+  while (renderedEnd > newEnd && rowsEl.lastChild) {
+    rowsEl.removeChild(rowsEl.lastChild);
+    renderedEnd--;
+  }
+  if (newStart < renderedStart) {
+    const frag = document.createDocumentFragment();
+    for (let i = newStart; i < renderedStart; i++) frag.appendChild(buildRow(displayRows[i], i));
+    rowsEl.insertBefore(frag, rowsEl.firstChild);
+    renderedStart = newStart;
+  }
+  if (newEnd > renderedEnd) {
+    const frag = document.createDocumentFragment();
+    for (let i = renderedEnd; i < newEnd; i++) frag.appendChild(buildRow(displayRows[i], i));
+    rowsEl.appendChild(frag);
+    renderedEnd = newEnd;
+  }
 }
 
 function buildRow(row, idx) {
@@ -174,6 +207,7 @@ function buildRow(row, idx) {
 // Transform filteredEntries → displayRows, folding consecutive identical runs when enabled
 function buildDisplayRows() {
   displayRows = [];
+  rowsDirty = true;
   if (!collapseRepeats) {
     for (const e of filteredEntries) displayRows.push({ entry: e, count: 1 });
     return;
@@ -435,19 +469,20 @@ function clearRange() {
 // ── Inspector panel ──────────────────────────────────────────
 function openInspector(entry) {
   const body = document.getElementById('inspector-body');
-  const fields = [
+  const metaFields = [
     ['Timestamp', entry.timestamp],
     ['Process',   entry.process],
     ['Level',     entry.level],
     ['Module',    entry.module],
     ['Source',    entry.source || '—'],
     ['Line #',    entry.line_number],
-    ['Message',   entry.message],
   ];
-  let html = fields.map(([k, v]) =>
+  let html = metaFields.map(([k, v]) =>
     `<div class="insp-field"><div class="insp-key">${esc(k)}</div>` +
     `<div class="insp-val">${esc(String(v))}</div></div>`
   ).join('');
+  html += `<div class="insp-field insp-field--message"><div class="insp-key">Message</div>` +
+    `<div class="insp-val">${esc(entry.message)}</div></div>`;
   html += `<button class="insp-copy" id="insp-copy">COPY RAW</button>`;
   body.innerHTML = html;
 
