@@ -581,18 +581,22 @@ async function handleUpload(files) {
   showLoading(true);
   hideError();
 
-  const fd = new FormData();
-  uploadedFiles.forEach(f => fd.append('files', f));
-
   try {
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.detail || `Server error ${res.status}`);
+    // Upload one file at a time to stay under Cloud Run's 32MB request limit
+    const allEntries = [];
+    for (const file of uploadedFiles) {
+      const fd = new FormData();
+      fd.append('files', file);
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `Server error ${res.status}`);
+      }
+      allEntries.push(...await res.json());
     }
-    const entries = await res.json();
+    allEntries.sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
     showLoading(false);
-    loadViewer(entries);
+    loadViewer(allEntries);
   } catch (err) {
     showLoading(false);
     showError(String(err.message));
