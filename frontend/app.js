@@ -23,7 +23,7 @@ function toggleTheme() {
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
 // ── Version ──────────────────────────────────────────────────
-const VERSION = 'v1.0.2';
+const VERSION = 'v1.0.3';
 
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
@@ -467,6 +467,17 @@ function clearRange() {
 }
 
 // ── Inspector panel ──────────────────────────────────────────
+function fallbackCopy(text, onSuccess) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try { document.execCommand('copy'); onSuccess?.(); } catch {}
+  document.body.removeChild(ta);
+}
+
 function openInspector(entry) {
   const body = document.getElementById('inspector-body');
   const metaFields = [
@@ -477,12 +488,17 @@ function openInspector(entry) {
     ['Source',    entry.source || '—'],
     ['Line #',    entry.line_number],
   ];
+  if (entry.count    != null) metaFields.push(['Count',   entry.count]);
+  if (entry.age      != null) metaFields.push(['Age',     entry.age]);
+
   let html = metaFields.map(([k, v]) =>
     `<div class="insp-field"><div class="insp-key">${esc(k)}</div>` +
     `<div class="insp-val">${esc(String(v))}</div></div>`
   ).join('');
-  html += `<div class="insp-field insp-field--message"><div class="insp-key">Message</div>` +
-    `<div class="insp-val">${esc(entry.message)}</div></div>`;
+  const msgLabel = entry.fault_message != null ? 'Fault Message' : 'Message';
+  const msgVal   = entry.fault_message ?? entry.message;
+  html += `<div class="insp-field insp-field--message"><div class="insp-key">${msgLabel}</div>` +
+    `<div class="insp-val">${esc(msgVal)}</div></div>`;
   html += `<button class="insp-copy" id="insp-copy">COPY RAW</button>`;
   body.innerHTML = html;
 
@@ -491,10 +507,24 @@ function openInspector(entry) {
   if (procVal) procVal.style.color = hashColor(entry.process);
 
   document.getElementById('insp-copy').addEventListener('click', () => {
-    navigator.clipboard?.writeText(entry.raw);
+    const fields = [...body.querySelectorAll('.insp-field')];
+    const text = fields.map(f => {
+      const k = f.querySelector('.insp-key')?.textContent ?? '';
+      const v = f.querySelector('.insp-val')?.textContent ?? '';
+      return `${k}: ${v}`;
+    }).join('\n');
+
     const btn = document.getElementById('insp-copy');
-    btn.textContent = 'COPIED ✓';
-    setTimeout(() => { btn.textContent = 'COPY RAW'; }, 1200);
+    const confirm = () => {
+      btn.textContent = 'COPIED ✓';
+      setTimeout(() => { btn.textContent = 'COPY RAW'; }, 1200);
+    };
+
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(confirm).catch(() => fallbackCopy(text, confirm));
+    } else {
+      fallbackCopy(text, confirm);
+    }
   });
 
   document.getElementById('inspector').classList.remove('hidden');
@@ -593,7 +623,7 @@ async function handleUpload(files) {
         worker.onerror = e => reject(new Error(e.message));
         worker.postMessage({ file });
       });
-      allEntries.push(...entries);
+      for (const e of entries) allEntries.push(e);
     }
     allEntries.sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
     showLoading(false);
@@ -687,9 +717,13 @@ function readDirEntries(reader) {
   return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
 }
 
+function isLogFile(name) {
+  return name.endsWith('.txt') || name.endsWith('.log');
+}
+
 async function collectTxtFiles(entry) {
   if (entry.isFile) {
-    if (entry.name.endsWith('.txt')) return [await fsEntryToFile(entry)];
+    if (isLogFile(entry.name)) return [await fsEntryToFile(entry)];
     return [];
   }
   if (entry.isDirectory) {
@@ -700,7 +734,7 @@ async function collectTxtFiles(entry) {
       const batch = await readDirEntries(reader);
       if (!batch.length) break;
       for (const child of batch) {
-        if (child.isFile && child.name.endsWith('.txt')) {
+        if (child.isFile && isLogFile(child.name)) {
           files.push(await fsEntryToFile(child));
         }
       }
