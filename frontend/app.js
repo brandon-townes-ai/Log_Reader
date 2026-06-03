@@ -23,7 +23,7 @@ function toggleTheme() {
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
 // ── Version ──────────────────────────────────────────────────
-const VERSION = 'v1.0.1';
+const VERSION = 'v1.0.2';
 
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
@@ -581,18 +581,19 @@ async function handleUpload(files) {
   showLoading(true);
   hideError();
 
+  const worker = new Worker('/parser.worker.js');
   try {
-    // Upload one file at a time to stay under Cloud Run's 32MB request limit
     const allEntries = [];
     for (const file of uploadedFiles) {
-      const fd = new FormData();
-      fd.append('files', file);
-      const res = await fetch('/api/upload', { method: 'POST', body: fd });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || `Server error ${res.status}`);
-      }
-      allEntries.push(...await res.json());
+      const entries = await new Promise((resolve, reject) => {
+        worker.onmessage = ({ data }) => {
+          if (data.type === 'done')  resolve(data.entries);
+          if (data.type === 'error') reject(new Error(data.message));
+        };
+        worker.onerror = e => reject(new Error(e.message));
+        worker.postMessage({ file });
+      });
+      allEntries.push(...entries);
     }
     allEntries.sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
     showLoading(false);
@@ -600,6 +601,8 @@ async function handleUpload(files) {
   } catch (err) {
     showLoading(false);
     showError(String(err.message));
+  } finally {
+    worker.terminate();
   }
 }
 
