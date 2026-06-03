@@ -23,7 +23,7 @@ function toggleTheme() {
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
 // ── Version ──────────────────────────────────────────────────
-const VERSION = 'v1.0.1';
+const VERSION = 'v1.0.2';
 
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
@@ -581,21 +581,28 @@ async function handleUpload(files) {
   showLoading(true);
   hideError();
 
-  const fd = new FormData();
-  uploadedFiles.forEach(f => fd.append('files', f));
-
+  const worker = new Worker('/parser.worker.js');
   try {
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.detail || `Server error ${res.status}`);
+    const allEntries = [];
+    for (const file of uploadedFiles) {
+      const entries = await new Promise((resolve, reject) => {
+        worker.onmessage = ({ data }) => {
+          if (data.type === 'done')  resolve(data.entries);
+          if (data.type === 'error') reject(new Error(data.message));
+        };
+        worker.onerror = e => reject(new Error(e.message));
+        worker.postMessage({ file });
+      });
+      allEntries.push(...entries);
     }
-    const entries = await res.json();
+    allEntries.sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
     showLoading(false);
-    loadViewer(entries);
+    loadViewer(allEntries);
   } catch (err) {
     showLoading(false);
     showError(String(err.message));
+  } finally {
+    worker.terminate();
   }
 }
 
