@@ -8,7 +8,7 @@ Built by [brandon.townes@applied.co](https://anaheim.applied.co/anaheim/appliedi
 
 ## Features
 
-- **Drag & drop** — drop a single file or an entire folder of `.txt` logs
+- **Drag & drop** — drop a single file or an entire folder of `.txt` / `.log` files
 - **Level filtering** — one-click filter for INFO, DEBUG, WARN, ERROR, FATAL, ALWAYS
 - **Process filtering** — multi-select dropdown to isolate specific nodes
 - **Regex search + exclude** — filter and anti-filter with full regex support
@@ -16,6 +16,7 @@ Built by [brandon.townes@applied.co](https://anaheim.applied.co/anaheim/appliedi
 - **Collapse repeats** — fold consecutive identical messages into a single row
 - **Entry inspector** — click any row for a full detail panel (timestamp, process, level, module, source, line #, message)
 - **Client-side parsing** — all parsing happens in the browser via WebWorker; no file data leaves your machine
+- **Fault monitor parsing** — auto-detects fault monitor tables (`ACTIVE FAULTS`, `FAULT EVENTS HISTORY`) and renders structured fields (severity, fault code, count, age, message)
 - **ANSI stripping** — cleans up terminal color codes from raw log output
 - **Light / dark mode**
 
@@ -50,7 +51,7 @@ Uses `apps-platform` to deploy to Google Cloud Run. The server is a thin static 
 
 ## Log format
 
-Expects ROS-style `.txt` log files with entries in the format:
+Expects ROS-style `.txt` or `.log` files with entries in the format:
 
 ```
 YYYY-MM-DD HH:MM:SS.ffffff[process][LEVEL][module][source] message
