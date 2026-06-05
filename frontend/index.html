@@ -128,6 +128,7 @@
     <div class="timeline-bar" id="timeline-bar">
       <canvas id="timeline-canvas"></canvas>
       <div id="timeline-brush"></div>
+      <div id="timeline-cursor" class="hidden"></div>
       <div id="timeline-range" class="timeline-range hidden">
         <span id="range-text"></span>
         <button id="range-clear" title="Clear time range" aria-label="Clear time range">&times;</button>
@@ -145,6 +146,7 @@
     </div>
 
     <aside id="inspector" class="inspector hidden" aria-label="Log entry detail">
+      <div class="inspector-resize-handle" id="inspector-resize-handle" aria-hidden="true"></div>
       <div class="inspector-head">
         <span class="inspector-title">ENTRY DETAIL</span>
         <button id="inspector-close" class="theme-toggle" aria-label="Close detail">&times;</button>
