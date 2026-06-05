@@ -23,7 +23,7 @@ function toggleTheme() {
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
 // ── Version ──────────────────────────────────────────────────
-const VERSION = 'v1.0.3';
+const VERSION = 'v1.0.4';
 
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
@@ -133,6 +133,7 @@ function renderRows() {
     rowsEl.textContent = '';
     renderedStart = renderedEnd = 0;
     rowsDirty = false;
+    document.getElementById('timeline-cursor')?.classList.add('hidden');
     return;
   }
 
@@ -140,6 +141,19 @@ function renderRows() {
   const clientHeight = container.clientHeight;
   const newStart = Math.max(0,     Math.floor(scrollTop / ROW_H) - BUFFER);
   const newEnd   = Math.min(total, Math.ceil((scrollTop + clientHeight) / ROW_H) + BUFFER);
+
+  // Update timeline scroll cursor
+  const cursor = document.getElementById('timeline-cursor');
+  if (cursor && displayRows.length && tEnd > tStart) {
+    const midIdx = Math.min(Math.floor((newStart + newEnd) / 2), displayRows.length - 1);
+    const t = displayRows[midIdx].entry._t;
+    const ratio = Math.max(0, Math.min(1, (t - tStart) / (tEnd - tStart)));
+    const barEl = document.getElementById('timeline-bar');
+    cursor.style.left = Math.round(ratio * barEl.clientWidth) + 'px';
+    cursor.classList.remove('hidden');
+  } else if (cursor) {
+    cursor.classList.add('hidden');
+  }
 
   spacerTop.style.height = `${newStart * ROW_H}px`;
   spacerBot.style.height = `${(total - newEnd) * ROW_H}px`;
@@ -558,10 +572,30 @@ function buildProcessDropdown() {
     return lbl;
   };
 
+  const searchInput = document.createElement('input');
+  searchInput.type = 'text';
+  searchInput.placeholder = 'Search…';
+  searchInput.className = 'dropdown-search';
+  searchInput.addEventListener('input', () => {
+    const q = searchInput.value.toLowerCase();
+    menu.querySelectorAll('.dropdown-item').forEach(item => {
+      const isAll = item.querySelector('input').value === '__ALL__';
+      item.style.display = (!q || isAll || item.textContent.toLowerCase().includes(q)) ? '' : 'none';
+    });
+  });
+  menu.appendChild(searchInput);
+
   menu.appendChild(mkItem('__ALL__', 'All processes'));
   processes.forEach(p => {
     const color = hashColor(p);
-    menu.appendChild(mkItem(p, `<span style="color:${color}">${esc(p)}</span>`));
+    const item = mkItem(p, `<span style="color:${color}">${esc(p)}</span>`);
+    item.addEventListener('dblclick', () => {
+      activeProcesses = new Set([p]);
+      menu.querySelectorAll('input').forEach(c => { c.checked = c.value === p; });
+      syncDropdownLabel();
+      applyFilters();
+    });
+    menu.appendChild(item);
   });
 
   menu.addEventListener('change', e => {
@@ -572,16 +606,11 @@ function buildProcessDropdown() {
       // "All processes" toggled — sync every process checkbox to match
       const checked = allChk.checked;
       procChks.forEach(c => { c.checked = checked; });
-      activeProcesses = checked ? null : null; // empty selection → treat as ALL
-      allChk.checked = true; // never allow ALL to be fully unchecked
+      activeProcesses = checked ? null : new Set();
     } else {
       // A specific process was toggled
-      const allSelected  = procChks.every(c => c.checked);
-      const noneSelected = procChks.every(c => !c.checked);
-
-      if (allSelected || noneSelected) {
-        // Back to all — reset
-        procChks.forEach(c => { c.checked = true; });
+      const allSelected = procChks.every(c => c.checked);
+      if (allSelected) {
         allChk.checked = true;
         activeProcesses = null;
       } else {
@@ -599,8 +628,9 @@ function buildProcessDropdown() {
 }
 
 function syncDropdownLabel() {
+  const n = activeProcesses === null ? null : activeProcesses.size;
   document.getElementById('dropdown-label').textContent =
-    activeProcesses === null ? 'All processes' : `${activeProcesses.size} selected`;
+    n === null ? 'All processes' : n === 0 ? 'No processes' : `${n} selected`;
 }
 
 // ── Upload ───────────────────────────────────────────────────
@@ -944,6 +974,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Inspector close ──
   document.getElementById('inspector-close').addEventListener('click', closeInspector);
+
+  // ── Inspector resize handle ──
+  const inspectorEl = document.getElementById('inspector');
+  const inspectorHandle = document.getElementById('inspector-resize-handle');
+  const INSPECTOR_H_KEY = 'log-reader-inspector-h';
+
+  const savedInspectorH = localStorage.getItem(INSPECTOR_H_KEY);
+  if (savedInspectorH) inspectorEl.style.height = savedInspectorH + 'px';
+
+  inspectorHandle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = inspectorEl.offsetHeight;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'ns-resize';
+
+    const onMove = ev => {
+      const newH = Math.max(80, Math.min(window.innerHeight * 0.8, startH + (startY - ev.clientY)));
+      inspectorEl.style.height = newH + 'px';
+    };
+    const onUp = ev => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      localStorage.setItem(INSPECTOR_H_KEY, inspectorEl.offsetHeight);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
 
   // ── Timeline brush (drag = range select, click = jump) ──
   const tlBar   = document.getElementById('timeline-bar');
