@@ -707,7 +707,8 @@ mark {
   top: 0;
   bottom: 0;
   width: 2px;
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--accent);
+  opacity: 0.8;
   pointer-events: none;
   z-index: 3;
   transform: translateX(-50%);
