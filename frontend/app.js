@@ -1188,6 +1188,108 @@ function toggleDockTab(tab) {
   dockTab === tab ? closeDock() : openDock(tab);
 }
 
+// ── Analyze (metrics + triage via /api/process) ──────────────
+// Sends the current (filtered) entries to the backend, which runs the same
+// analyzer the CLI `process` subcommand uses, and renders summary + triage.
+async function openAnalyze() {
+  if (!allEntries.length) return;
+  const modal = document.getElementById('analyze-modal');
+  const body  = document.getElementById('analyze-body');
+  modal.classList.remove('hidden');
+
+  const filtered = filteredEntries.length < allEntries.length;
+  const scope = filtered
+    ? `${filteredEntries.length.toLocaleString()} filtered`
+    : `${allEntries.length.toLocaleString()}`;
+  body.innerHTML = `<div class="az-status">analyzing ${scope} entries&hellip;</div>`;
+
+  let res;
+  try {
+    res = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries: filteredEntries, top: 20 }),
+    });
+  } catch (err) {
+    body.innerHTML = `<div class="az-status az-error">analysis failed: ${esc(String(err))}</div>`;
+    return;
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    body.innerHTML = `<div class="az-status az-error">${esc(data.reason || ('HTTP ' + res.status))}</div>`;
+    return;
+  }
+  const data = await res.json();
+  renderAnalyze(data.summary, data.triage, filtered);
+}
+
+function closeAnalyze() {
+  document.getElementById('analyze-modal').classList.add('hidden');
+}
+
+function azMetric(label, val, color) {
+  return `<div class="az-metric"><div class="az-metric-val"${color ? ` style="color:${color}"` : ''}>` +
+    `${esc(String(val))}</div><div class="az-metric-label">${esc(label)}</div></div>`;
+}
+
+// rows: [[cellHtml, count], ...] — cellHtml is trusted markup (already escaped within).
+function azTable(title, colLabel, rows) {
+  let h = `<section class="az-section"><h3 class="az-h">${esc(title)}</h3><table class="az-table">`;
+  h += `<thead><tr><th>${esc(colLabel)}</th><th class="az-num">count</th></tr></thead><tbody>`;
+  for (const [cell, count] of rows) {
+    h += `<tr><td>${cell}</td><td class="az-num">${esc(String(count))}</td></tr>`;
+  }
+  return h + `</tbody></table></section>`;
+}
+
+function renderAnalyze(summary, triage, filtered) {
+  const body = document.getElementById('analyze-body');
+  const span = summary.duration_s != null ? `${summary.duration_s.toFixed(1)}s` : 'n/a';
+
+  let html = '';
+  if (filtered) html += `<div class="az-scope">analysis reflects the current filtered view</div>`;
+
+  html += `<section class="az-section"><div class="az-metrics">`;
+  html += azMetric('ENTRIES', summary.total.toLocaleString());
+  html += azMetric('ERRORS', summary.error_count.toLocaleString(), LEVEL_COLORS.ERROR);
+  html += azMetric('WARNINGS', summary.warn_count.toLocaleString(), LEVEL_COLORS.WARN);
+  html += azMetric('SPAN', span);
+  html += `</div></section>`;
+
+  html += azTable('BY LEVEL', 'level',
+    Object.entries(summary.by_level).sort((a, b) => b[1] - a[1]).map(([lv, n]) =>
+      [`<span style="color:${LEVEL_COLORS[lv] || 'var(--text-dim)'}">${esc(lv)}</span>`, n]));
+
+  html += azTable('TOP PROCESSES', 'process',
+    Object.entries(summary.by_process).slice(0, 10).map(([p, n]) =>
+      [`<span style="color:${hashColor(p)}">${esc(p)}</span>`, n]));
+
+  html += `<section class="az-section"><h3 class="az-h">TRIAGE &mdash; ${triage.finding_count} findings ` +
+    `(<span style="color:${LEVEL_COLORS.FATAL}">${triage.fatal} fatal</span>, ` +
+    `<span style="color:${LEVEL_COLORS.ERROR}">${triage.error} error</span>, ` +
+    `<span style="color:${LEVEL_COLORS.WARN}">${triage.warn} warn</span>)</h3>`;
+  if (!triage.findings.length) {
+    html += `<div class="az-empty">No ERROR/FATAL/WARN findings.</div>`;
+  } else {
+    html += `<div class="az-findings">`;
+    for (const f of triage.findings) {
+      const c = LEVEL_COLORS[f.severity] || 'var(--text-dim)';
+      html += `<div class="az-finding">` +
+        `<div class="az-finding-head">` +
+        `<span class="az-sev" style="color:${c};border-color:${c}">${esc(f.severity)}</span>` +
+        `<span class="az-fcount">&times;${f.count.toLocaleString()}</span>` +
+        `<span class="az-fprocs">${esc(f.processes.join(', '))}</span></div>` +
+        `<div class="az-fmsg">${esc(f.sample_message)}</div>` +
+        `<div class="az-fmeta">${esc(f.first_ts || '?')} &rarr; ${esc(f.last_ts || '?')}</div>` +
+        `</div>`;
+    }
+    html += `</div>`;
+  }
+  html += `</section>`;
+
+  body.innerHTML = html;
+}
+
 // ── Level Pills ──────────────────────────────────────────────
 function syncLevelPills() {
   document.querySelectorAll('#level-pills .pill').forEach(pill => {
@@ -1407,6 +1509,7 @@ function loadViewer(entries, signals = [], truncated = false) {
   dockTab = null;
   renderDock();
   closeInspector();
+  closeAnalyze();
   syncLevelPills();
   buildProcessDropdown();
   buildDisplayRows();
@@ -1431,6 +1534,146 @@ function loadViewer(entries, signals = [], truncated = false) {
   showViewer();
 }
 
+// ── OCI / run-id source (CoreStack acquisition layer) ────────
+// Sibling of handleUpload: parse preloaded {name,text} items via the worker and
+// load them into the same viewer. Used by the OCI run-id picker below.
+async function loadSources(items) {
+  if (!items || !items.length) return;
+  uploadedFiles = items.map(it => ({ name: it.name }));
+
+  showLoading(true);
+  hideError();
+
+  const worker = new Worker('/parser.worker.js');
+  try {
+    const collected = [];
+    const signalChunks = [];
+    let truncated = false;
+    for (const it of items) {
+      const data = await new Promise((resolve, reject) => {
+        worker.onmessage = ({ data }) => {
+          // big logs arrive as N 'chunk' messages followed by one 'done'
+          if (data.type === 'chunk') {
+            for (const e of data.entries) { e.file = it.name; collected.push(e); }
+            return;
+          }
+          if (data.type === 'done')  resolve(data);
+          if (data.type === 'error') reject(new Error(data.message));
+        };
+        worker.onerror = e => reject(new Error(e.message));
+        worker.postMessage({ name: it.name, text: it.text });
+      });
+      for (const e of data.entries) { e.file = it.name; collected.push(e); }
+      if (data.signals) signalChunks.push(...data.signals);
+      if (data.truncated) truncated = true;
+    }
+    collected.sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
+    showLoading(false);
+    loadViewer(collected, signalChunks, truncated);
+  } catch (err) {
+    showLoading(false);
+    showError(String(err.message));
+  } finally {
+    worker.terminate();
+  }
+}
+
+// Wire up the URSA command-line search. When creds are available it resolves a
+// run and auto-loads ALL of its logs/ files straight into the parser. When they
+// are not (no creds, or a static host with no backend), the input is disabled and
+// the drop zone is promoted so local drag-drop still works.
+async function initSource() {
+  const form       = document.getElementById('source-picker');
+  const runidInput = document.getElementById('runid-input');
+  const titleEl    = document.getElementById('sp-title');
+  const content    = document.querySelector('.upload-content');
+  if (!form || !runidInput) return;
+
+  let status = null;
+  try {
+    status = await fetch('/api/status').then(r => r.json());
+  } catch { /* no backend (static host) */ }
+
+  if (!status || status.acquisition !== 'available') {
+    // URSA unavailable: dim the command line, promote local drag-drop.
+    content?.classList.add('no-oci');
+    runidInput.disabled = true;
+    runidInput.placeholder = status && status.reason
+      ? `URSA unavailable — ${status.reason}`
+      : 'URSA unavailable — drop local files below';
+    return;
+  }
+
+  const setStatus = (msg, busy = false) => {
+    titleEl.textContent = msg || '';
+    titleEl.classList.toggle('busy', Boolean(busy));
+  };
+
+  // Resolve a run, then fetch every file under logs/ and hand them to the parser.
+  async function loadRun(runId) {
+    runId = (runId || '').trim();
+    if (!runId) return;
+    hideError();
+    setStatus(`resolving ${runId}…`, true);
+
+    let res;
+    try {
+      res = await fetch('/api/oci/logs?run_id=' + encodeURIComponent(runId));
+    } catch (err) {
+      setStatus('');
+      showError(String(err));
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setStatus('');
+      showError(body.reason || `failed to resolve (HTTP ${res.status})`);
+      return;
+    }
+
+    const data  = await res.json();
+    const files = data.files || [];
+    const label = data.custom_id || runId;
+    if (!files.length) {
+      setStatus(`no files under logs/ for ${label}`);
+      return;
+    }
+
+    // Auto-load all files (no per-file picker).
+    try {
+      const items = [];
+      for (const f of files) {
+        setStatus(`${label} · fetching ${items.length + 1}/${files.length}…`, true);
+        const r = await fetch('/api/oci/file?run_id=' + encodeURIComponent(runId) +
+                              '&key=' + encodeURIComponent(f.key));
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.reason || `failed to fetch ${f.name}`);
+        }
+        items.push({ name: f.name, text: await r.text() });
+      }
+      setStatus('');
+      loadSources(items);  // shows its own parsing overlay, then the viewer
+    } catch (err) {
+      setStatus('');
+      showError(String(err.message || err));
+    }
+  }
+
+  form.addEventListener('submit', e => { e.preventDefault(); loadRun(runidInput.value); });
+
+  // If the CLI was launched with a run-id, auto-load it.
+  try {
+    const src = await fetch('/api/source').then(r => r.json());
+    if (src && src.type === 'oci' && src.arg) {
+      runidInput.value = src.arg;
+      loadRun(src.arg);
+    }
+  } catch { /* ignore */ }
+
+  runidInput.focus();
+}
+
 // ── Screen transitions ───────────────────────────────────────
 function showViewer() {
   document.getElementById('upload-screen').classList.remove('active');
@@ -1446,6 +1689,16 @@ function showUpload() {
   signalData = new Map();
   signalStats = [];
   activeSignals = [];
+
+  // Reset the URSA command line so a fresh run is a clean slate.
+  const runidInput = document.getElementById('runid-input');
+  const titleEl = document.getElementById('sp-title');
+  if (titleEl) { titleEl.textContent = ''; titleEl.classList.remove('busy'); }
+  hideError();
+  if (runidInput && !runidInput.disabled) {
+    runidInput.value = '';
+    runidInput.focus();
+  }
 }
 
 function showLoading(on) {
@@ -1587,6 +1840,7 @@ function initGridCanvas() {
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   initGridCanvas();
+  initSource();
   document.getElementById('version-tag').textContent = VERSION;
   pendingHashState = parseHash();
 
@@ -1628,6 +1882,12 @@ document.addEventListener('DOMContentLoaded', () => {
     fileInput.click();
   });
   document.getElementById('clear-btn').addEventListener('click', showUpload);
+
+  // ── Analyze (metrics + triage) ──
+  document.getElementById('analyze-btn').addEventListener('click', openAnalyze);
+  document.getElementById('analyze-close').addEventListener('click', closeAnalyze);
+  const analyzeModal = document.getElementById('analyze-modal');
+  analyzeModal.addEventListener('click', e => { if (e.target === analyzeModal) closeAnalyze(); });
 
   // ── Level pills ──
   document.querySelectorAll('#level-pills .pill').forEach(pill => {
@@ -1845,6 +2105,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Escape') {
       closeDock();
       closeDropdown();
+      closeAnalyze();
     }
   });
 

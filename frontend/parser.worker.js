@@ -254,11 +254,13 @@ function isFaultMonitorFormat(text) {
 // ── Worker entry point ────────────────────────────────────────
 self.onmessage = async ({ data }) => {
   try {
-    const text = await data.file.text();
+    // Accept either a dropped File (drag-drop) or preloaded text (OCI source).
+    const text = data.file ? await data.file.text() : data.text;
+    const name = data.file ? data.file.name : (data.name || '');
 
     // Numeric signal files (.csv / .jsonl / telegraf .out) produce
     // time-series samples instead of log entries
-    const signalParser = signalParserFor(data.file.name, text);
+    const signalParser = signalParserFor(name, text);
     if (signalParser) {
       const { signals, truncated } = signalParser();
       self.postMessage({ type: 'done', entries: [], signals, truncated });
