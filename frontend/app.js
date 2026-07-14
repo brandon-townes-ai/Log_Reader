@@ -23,7 +23,7 @@ function toggleTheme() {
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
 // ── Version ──────────────────────────────────────────────────
-const VERSION = 'v1.0.6';
+const VERSION = 'v1.0.7';
 
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [

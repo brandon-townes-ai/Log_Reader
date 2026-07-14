@@ -2,9 +2,3 @@ fastapi==0.136.3
 uvicorn[standard]==0.48.0
 python-multipart==0.0.29
 rich==13.7.1
-
-# ursa-py is Applied-internal -- NOT on public PyPI. Install from the private
-# index; keep credentials OUT of git (pass them at install/build time), e.g.:
-#   pip install --extra-index-url https://<user>:<pass>@ursa.pypi.applied.dev/simple ursa-py
-# In Cloud Run, supply the index URL as a build secret (see deploy docs).
-ursa-py

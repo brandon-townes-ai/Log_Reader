@@ -19,8 +19,13 @@ logger = logging.getLogger(__name__)
 # FileList prefix for a run's text logs.
 LOGS_PREFIX = "logs"
 
-# Hard cap on a single log fetch to avoid OOM on a stray large/binary object.
-DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+# Cap on a single log fetch -- a guard against a pathological / binary object, not
+# a memory bound (the API streams the file in chunks). Tunable via
+# BAG_READER_MAX_FILE_BYTES. Note: on Cloud Run gen2 the temp file lives in /tmp
+# (memory-backed), so very large logs still pressure the instance's RAM.
+DEFAULT_MAX_BYTES = int(
+    os.environ.get("BAG_READER_MAX_FILE_BYTES", str(512 * 1024 * 1024))
+)
 
 
 class OciError(Exception):
@@ -233,12 +238,17 @@ def list_logs(run_id: str) -> tuple[dict, list[LogFile]]:
     return info, _list_logs_for_uuid(info["uuid"])
 
 
-def fetch_log(run_id: str, key: str, max_bytes: int = DEFAULT_MAX_BYTES) -> bytes:
-    """Download a single log object and return its bytes.
+def fetch_log_to_path(run_id: str, key: str, max_bytes: int = DEFAULT_MAX_BYTES) -> str:
+    """Download a single log object to a temp file and return its path.
 
     ``key`` MUST be a member of ``list_logs(run_id)`` (guards against path
     traversal / arbitrary-key fetches). Enforces a size cap before and after
-    download. Raises OciError on any violation or SDK failure.
+    download. The CALLER owns the returned temp file and must delete it. Raises
+    OciError on any violation or SDK failure (and cleans up the temp file itself).
+
+    Returning a path (rather than bytes) lets the API stream the file in chunks --
+    required because Cloud Run rejects non-streamed responses over 32 MiB, and to
+    keep memory bounded for large logs.
     """
     info, files = list_logs(run_id)
     match = next((f for f in files if f.key == key), None)
@@ -259,15 +269,26 @@ def fetch_log(run_id: str, key: str, max_bytes: int = DEFAULT_MAX_BYTES) -> byte
             raise OciError(
                 f"{key!r} downloaded {size} bytes, exceeds cap of {max_bytes} bytes"
             )
-        with open(tmp_path, "rb") as fh:
-            return fh.read()
-    except OciError:
-        raise
+        return tmp_path
     except Exception as exc:
-        raise OciError(f"could not download {key!r}: {exc}") from exc
-    finally:
         try:
             os.unlink(tmp_path)
+        except OSError:
+            pass
+        if isinstance(exc, OciError):
+            raise
+        raise OciError(f"could not download {key!r}: {exc}") from exc
+
+
+def fetch_log(run_id: str, key: str, max_bytes: int = DEFAULT_MAX_BYTES) -> bytes:
+    """Download a single log object and return its bytes (small files / CLI use)."""
+    path = fetch_log_to_path(run_id, key, max_bytes)
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(path)
         except OSError:
             pass
 

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.backend import oci_source
@@ -75,7 +75,12 @@ def api_oci_logs(run_id: str):
 
 @app.get("/api/oci/file")
 def api_oci_file(run_id: str, key: str):
-    """Fetch a single log object as text/plain (key must belong to the run)."""
+    """Stream a single log object as text/plain (key must belong to the run).
+
+    Streamed (chunked) rather than buffered: Cloud Run rejects non-streamed
+    responses over 32 MiB, and logs can be much larger. The temp file downloaded
+    by fetch_log_to_path is deleted when the stream finishes.
+    """
     p = oci_source.probe()
     if not p.get("available"):
         return JSONResponse(
@@ -83,13 +88,25 @@ def api_oci_file(run_id: str, key: str):
             content={"status": "unavailable", "reason": p.get("reason", "")},
         )
     try:
-        data = oci_source.fetch_log(run_id, key)
+        path = oci_source.fetch_log_to_path(run_id, key)
     except oci_source.OciError as exc:
         return JSONResponse(
             status_code=400, content={"status": "error", "reason": str(exc)}
         )
-    return Response(
-        content=data,
+
+    def _stream():
+        try:
+            with open(path, "rb") as fh:
+                while chunk := fh.read(1024 * 1024):
+                    yield chunk
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    return StreamingResponse(
+        _stream(),
         media_type="text/plain; charset=utf-8",
         headers={"X-Log-Name": os.path.basename(key)},
     )
