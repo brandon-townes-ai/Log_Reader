@@ -35,17 +35,52 @@ make run
 make dev
 ```
 
-Requires Python 3.11+.
+Requires Python 3.11+. Everything is driven through `make` — see the reference below.
+
+### Make targets
+
+| Target | What it does |
+| --- | --- |
+| `make install` | Create the `venv` (if needed) and install `requirements.txt`. |
+| `make install-oci` | `install` **plus** `ursa-py` for OCI/URSA bag fetch. `ursa-py` lives on Applied's private index, so pass `URSA_PYPI_INDEX="https://<user>:<pass>@ursa.pypi.applied.dev/simple"` — credentials never land in git. |
+| `make run` | Serve the frontend at `http://localhost:8000` (no hot reload). |
+| `make dev` | Same as `run`, with `--reload` for hot reload. **Drag-drop only** — no OCI token, so the run-id / bag-link box is inactive. |
+| `make cli` | Run the terminal log viewer: `make cli ARGS="<file\|dir> [--level L] [--search TXT] [--process NAME]"`. |
+| `make image` | Build the deployable Docker image with `ursa-py` baked in. Needs `URSA_PYPI_INDEX` (passed as a BuildKit secret, never in git or image layers). |
+| `make deploy` | Deploy the locally-built image to Cloud Run via `apps-platform`. |
+| `make ship` | `image` + `deploy` in one step. |
+| `make clean` | Remove `venv` and all `__pycache__` / `.pyc` files. |
+
+### Local dev with OCI bag fetch
+
+`make dev` starts the server **without** a URSA token, so it's drag-drop only. To
+work the run-id / bag-link box locally, use the helper script instead:
+
+```bash
+./dev-oci.sh
+```
+
+It mints a URSA token from your local AWS SSO session, then starts the server
+(`--reload`) with the token exported so the server can fetch bags. Requires
+`make install-oci` to have run and a valid default AWS SSO session; if the token
+can't be minted it falls back to drag-drop mode.
 
 ---
 
 ## Deploying
 
 ```bash
-make deploy
+make ship        # build the OCI-enabled image + deploy in one step
+# or individually:
+make image       # build the image (needs URSA_PYPI_INDEX)
+make deploy      # deploy the locally-built image
 ```
 
 Uses `apps-platform` to deploy to Google Cloud Run. The server is a thin static file host — all parsing runs client-side, so there are no server timeouts or memory constraints tied to file size.
+
+For the full OCI/URSA bag-fetch deploy (setting machine + OCI credentials, gating
+access), see **[DEPLOY.md](DEPLOY.md)**. The one-time credential load is scripted in
+`./setup-secrets.sh`.
 
 ---
 
