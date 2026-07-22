@@ -61,7 +61,7 @@ let tEnd            = 0;
 let uploadedFiles   = [];
 let latencyStats     = [];    // [{tag, count, mean, p50, p95, max}] from latency.js
 let latencySamples   = [];    // entries with latency_ms, in timestamp order
-let latencyPanelOpen = false;
+let dockTab          = null;  // null | 'inspect' | 'latency' | 'signals' — open dock tab
 let latencySortKey   = 'p95';
 let latencySortDir   = -1;    // -1 desc, 1 asc
 let activeLatencyTag = null;  // string | null
@@ -72,7 +72,6 @@ let clockSkew        = [];    // [{file, offsetMs, tMin, tMax}] flagged by detec
 let signalData       = new Map();  // signal name → {t:[], v:[], min, max}
 let signalStats      = [];    // [{name, count, min, mean, max}] for the panel
 let activeSignals    = [];    // names overlaid on the timeline (≤ MAX_ACTIVE_SIGNALS)
-let signalsPanelOpen = false;
 let signalsSortKey   = 'count';
 let signalsSortDir   = -1;
 let signalsFilter    = '';
@@ -348,11 +347,7 @@ function applyHashState(st) {
   }
   if (st.lat && latencyStats.some(s => s.tag === st.lat)) {
     activeLatencyTag = st.lat;
-    latencyPanelOpen = true;
-    const btn = document.getElementById('latency-toggle');
-    btn.classList.add('active');
-    btn.setAttribute('aria-pressed', 'true');
-    renderLatencyPanel();
+    openDock('latency');
   }
   if (st.lanes === 'proc' || st.lanes === 'file') setLaneMode(st.lanes);
   if (st.sig) activeSignals = st.sig.filter(n => signalData.has(n)).slice(0, MAX_ACTIVE_SIGNALS);
@@ -433,9 +428,7 @@ function fmtMs(ms) {
 
 // ── Latency panel ────────────────────────────────────────────
 function renderLatencyPanel() {
-  const panel = document.getElementById('latency-panel');
-  panel.classList.toggle('hidden', !latencyPanelOpen);
-  if (!latencyPanelOpen) return;
+  if (dockTab !== 'latency') return;
 
   const dir = latencySortDir;
   const rows = [...latencyStats].sort((a, b) => {
@@ -457,7 +450,7 @@ function renderLatencyPanel() {
       `<td>${fmtMs(s.mean)}</td><td>${fmtMs(s.p50)}</td><td>${fmtMs(s.p95)}</td><td>${fmtMs(s.max)}</td></tr>`;
   }
   html += '</tbody></table>';
-  panel.innerHTML = html;
+  document.getElementById('latency-table-wrap').innerHTML = html;
 }
 
 // ── Signals panel + overlay ──────────────────────────────────
@@ -473,9 +466,7 @@ function fmtSigVal(v) {
 }
 
 function renderSignalsPanel() {
-  const panel = document.getElementById('signals-panel');
-  panel.classList.toggle('hidden', !signalsPanelOpen);
-  if (!signalsPanelOpen) return;
+  if (dockTab !== 'signals') return;
 
   const q = signalsFilter.toLowerCase();
   const rows = signalStats
@@ -513,14 +504,6 @@ function toggleSignalOverlay(name) {
   renderSignalsPanel();
   renderTimeline();
   serializeHash();
-}
-
-function toggleSignalsPanel() {
-  signalsPanelOpen = !signalsPanelOpen;
-  const btn = document.getElementById('signals-toggle');
-  btn.classList.toggle('active', signalsPanelOpen);
-  btn.setAttribute('aria-pressed', String(signalsPanelOpen));
-  renderSignalsPanel();
 }
 
 // Per-pixel min/max strips, each signal normalized to its own [min, max] —
@@ -573,19 +556,6 @@ function selectLatencyTag(tag) {
   renderTimeline();
 }
 
-function toggleLatencyPanel() {
-  latencyPanelOpen = !latencyPanelOpen;
-  const btn = document.getElementById('latency-toggle');
-  btn.classList.toggle('active', latencyPanelOpen);
-  btn.setAttribute('aria-pressed', String(latencyPanelOpen));
-  if (!latencyPanelOpen && activeLatencyTag !== null) {
-    activeLatencyTag = null;  // closing the panel clears its filter — no hidden state
-    applyFilters();
-  }
-  renderLatencyPanel();
-  renderTimeline();
-}
-
 // ── Stats Bar ────────────────────────────────────────────────
 function renderStats() {
   const bar = document.getElementById('stats-bar');
@@ -611,61 +581,50 @@ function renderStats() {
     if (!first) frag.appendChild(sep());
     first = false;
     const chip = document.createElement('span');
-    chip.className = 'stat-chip stat-chip--level';
-    chip.title = `Filter ${lv}`;
+    chip.className = 'stat-chip';
     chip.innerHTML =
       `<span class="stat-dot" style="background:${LEVEL_COLORS[lv] || '#94a3b8'}"></span>` +
       `<span class="stat-label">${lv}</span>` +
       `<span class="stat-val">${levelCounts[lv].toLocaleString()}</span>`;
-    chip.addEventListener('click', () => toggleLevel(lv));
     frag.appendChild(chip);
   });
 
-  // Latency summary — toggles the latency panel
+  // Latency summary (open via the LATENCY pill)
   if (latencySamples.length) {
     frag.appendChild(sep());
     const lat = document.createElement('span');
-    lat.className = 'stat-chip stat-chip--level';
-    lat.title = 'Toggle latency panel';
+    lat.className = 'stat-chip';
     lat.innerHTML =
       `<span class="stat-dot" style="background:var(--cyan)"></span>` +
       `<span class="stat-label">LAT</span>` +
       `<span class="stat-val">${latencySamples.length.toLocaleString()} samples · ${latencyStats.length} tags</span>`;
-    lat.addEventListener('click', toggleLatencyPanel);
     frag.appendChild(lat);
   }
 
-  // Clock-skew warning — click to switch the timeline to file lanes
+  // Clock-skew warning (inspect via LANES: FILE)
   if (clockSkew.length) {
     frag.appendChild(sep());
     const chip = document.createElement('span');
-    chip.className = 'stat-chip stat-chip--level';
+    chip.className = 'stat-chip';
     chip.title = clockSkew.map(s =>
       `${s.file} starts +${fmtDuration(s.offsetMs)} after the earliest file (${fmtClock(s.tMin)}→${fmtClock(s.tMax)})`
-    ).join('\n') + '\nClick to show file lanes';
+    ).join('\n');
     chip.innerHTML =
       `<span class="stat-label" style="color:${LEVEL_COLORS.WARN}">⚠ CLOCK SKEW</span>` +
       `<span class="stat-val" style="color:${LEVEL_COLORS.WARN}">${clockSkew.length} file${clockSkew.length > 1 ? 's' : ''}</span>`;
-    chip.addEventListener('click', () => {
-      setLaneMode('file');
-      renderTimeline();
-      serializeHash();
-    });
     frag.appendChild(chip);
   }
 
-  // Numeric signals — toggles the signals panel
+  // Numeric signals summary (open via the SIGNALS pill)
   if (signalData.size) {
     frag.appendChild(sep());
     const sig = document.createElement('span');
-    sig.className = 'stat-chip stat-chip--level';
-    sig.title = 'Toggle signals panel' +
-      (signalsTruncated ? ' — ⚠ sample cap hit, some samples were dropped' : '');
+    sig.className = 'stat-chip';
+    sig.title = signalsTruncated ? '⚠ sample cap hit — some samples were dropped' : '';
     sig.innerHTML =
       `<span class="stat-dot" style="background:${SIGNAL_COLORS[0]}"></span>` +
       `<span class="stat-label">SIG</span>` +
       `<span class="stat-val">${signalData.size.toLocaleString()} signal${signalData.size > 1 ? 's' : ''}${signalsTruncated ? ' ⚠' : ''}</span>`;
-    sig.addEventListener('click', toggleSignalsPanel);
     frag.appendChild(sig);
   }
 
@@ -689,9 +648,7 @@ function renderStats() {
       const el = document.createElement('span');
       el.className = 'stat-val stat-proc';
       el.style.color = hashColor(p);
-      el.title = `Filter to ${p}`;
       el.textContent = `${p} ${c.toLocaleString()}`;
-      el.addEventListener('click', () => focusProcess(p));
       noisy.appendChild(el);
       noisy.appendChild(document.createTextNode(' '));
     });
@@ -699,17 +656,6 @@ function renderStats() {
   }
 
   bar.appendChild(frag);
-}
-
-// Narrow the process filter to a single process (used by stats links)
-function focusProcess(p) {
-  activeProcesses = new Set([p]);
-  const menu = document.getElementById('dropdown-menu');
-  menu.querySelectorAll('input').forEach(c => {
-    c.checked = c.value === '__ALL__' ? false : c.value === p;
-  });
-  syncDropdownLabel();
-  applyFilters();
 }
 
 // ── Timeline histogram / lanes ───────────────────────────────
@@ -772,7 +718,7 @@ function renderTimeline() {
   }
 
   // Latency scatter overlay (log-scale Y) while the latency panel is open
-  if (latencyPanelOpen && latencySamples.length) {
+  if (dockTab === 'latency' && latencySamples.length) {
     let maxLat = 0;
     for (const e of latencySamples) if (e.latency_ms > maxLat) maxLat = e.latency_ms;
     const denom  = Math.log1p(maxLat) || 1;
@@ -1056,17 +1002,61 @@ function openInspector(entry) {
     }
   });
 
-  document.getElementById('inspector').classList.remove('hidden');
   selectedEntry = entry;
   serializeHash();
+  openDock('inspect');
 }
 
 function closeInspector() {
-  document.getElementById('inspector').classList.add('hidden');
   if (selectedEntry !== null) {
     selectedEntry = null;
     serializeHash();
   }
+  document.getElementById('inspector-body').innerHTML =
+    '<div class="insp-empty">Select a log row to see its details.</div>';
+  if (dockTab === 'inspect') closeDock();
+}
+
+// ── Analysis dock (INSPECT / LATENCY / SIGNALS tabs) ─────────
+function renderDock() {
+  document.getElementById('dock').classList.toggle('hidden', dockTab === null);
+  document.querySelectorAll('.dock-tab').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.tab === dockTab));
+  document.getElementById('dock-inspect').classList.toggle('active', dockTab === 'inspect');
+  document.getElementById('dock-latency').classList.toggle('active', dockTab === 'latency');
+  document.getElementById('dock-signals').classList.toggle('active', dockTab === 'signals');
+  const latBtn = document.getElementById('latency-toggle');
+  latBtn.classList.toggle('active', dockTab === 'latency');
+  latBtn.setAttribute('aria-pressed', String(dockTab === 'latency'));
+  const sigBtn = document.getElementById('signals-toggle');
+  sigBtn.classList.toggle('active', dockTab === 'signals');
+  sigBtn.setAttribute('aria-pressed', String(dockTab === 'signals'));
+  if (dockTab === 'latency') renderLatencyPanel();
+  if (dockTab === 'signals') renderSignalsPanel();
+}
+
+function openDock(tab) {
+  if (dockTab === tab) return;
+  const latencyVisibilityChanged = (dockTab === 'latency') !== (tab === 'latency');
+  dockTab = tab;
+  renderDock();
+  if (latencyVisibilityChanged) renderTimeline();  // scatter overlay follows the latency tab
+}
+
+function closeDock() {
+  if (dockTab === null) return;
+  const wasLatency = dockTab === 'latency';
+  dockTab = null;
+  renderDock();
+  if (activeLatencyTag !== null) {
+    activeLatencyTag = null;  // dock gone = latency filter gone; no hidden state
+    applyFilters();
+  }
+  if (wasLatency) renderTimeline();
+}
+
+function toggleDockTab(tab) {
+  dockTab === tab ? closeDock() : openDock(tab);
 }
 
 // ── Level Pills ──────────────────────────────────────────────
@@ -1222,13 +1212,9 @@ function loadViewer(entries, signals = [], truncated = false) {
   activeSignals    = [];
   signalsTruncated = truncated;
   signalsFilter    = '';
-  signalsPanelOpen = false;
-  const sigBtn = document.getElementById('signals-toggle');
-  sigBtn.classList.remove('active');
-  sigBtn.setAttribute('aria-pressed', 'false');
   document.getElementById('signals-search').value = '';
-  document.getElementById('signals-group').classList.toggle('hidden', !signalData.size);
-  renderSignalsPanel();
+  document.getElementById('signals-toggle').classList.toggle('hidden', !signalData.size);
+  document.getElementById('dock-tab-signals').classList.toggle('hidden', !signalData.size);
 
   // dataset bounds — from entries; a signals-only drop falls back to signal range
   tStart = Infinity;
@@ -1262,15 +1248,11 @@ function loadViewer(entries, signals = [], truncated = false) {
   // Latency stats for the dataset
   latencyStats     = computeLatencyStats(entries);
   latencySamples   = entries.filter(e => e.latency_ms != null);
-  latencyPanelOpen = false;
   latencySortKey   = 'p95';
   latencySortDir   = -1;
   activeLatencyTag = null;
-  document.getElementById('latency-group').classList.toggle('hidden', !latencySamples.length);
-  const latBtn = document.getElementById('latency-toggle');
-  latBtn.classList.remove('active');
-  latBtn.setAttribute('aria-pressed', 'false');
-  renderLatencyPanel();
+  document.getElementById('latency-toggle').classList.toggle('hidden', !latencySamples.length);
+  document.getElementById('dock-tab-latency').classList.toggle('hidden', !latencySamples.length);
 
   // Reset UI
   document.getElementById('search-input').value = '';
@@ -1279,6 +1261,8 @@ function loadViewer(entries, signals = [], truncated = false) {
   document.getElementById('collapse-toggle').setAttribute('aria-pressed', 'false');
   document.querySelector('.timeline-selection')?.remove();
   showRangeReadout();
+  dockTab = null;
+  renderDock();
   closeInspector();
   syncLevelPills();
   buildProcessDropdown();
@@ -1562,12 +1546,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('lanes-toggle').addEventListener('click', cycleLaneMode);
 
   // ── Signals panel: toggle pill, search, sortable headers, row click to overlay ──
-  document.getElementById('signals-toggle').addEventListener('click', toggleSignalsPanel);
+  document.getElementById('signals-toggle').addEventListener('click', () => toggleDockTab('signals'));
   document.getElementById('signals-search').addEventListener('input', e => {
     signalsFilter = e.target.value;
     renderSignalsPanel();
   });
-  document.getElementById('signals-panel').addEventListener('click', e => {
+  document.getElementById('dock-signals').addEventListener('click', e => {
     const th = e.target.closest('th[data-sort]');
     if (th) {
       const key = th.dataset.sort;
@@ -1581,8 +1565,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Latency panel: toggle pill, sortable headers, row click to filter ──
-  document.getElementById('latency-toggle').addEventListener('click', toggleLatencyPanel);
-  document.getElementById('latency-panel').addEventListener('click', e => {
+  document.getElementById('latency-toggle').addEventListener('click', () => toggleDockTab('latency'));
+  document.getElementById('dock-latency').addEventListener('click', e => {
     const th = e.target.closest('th[data-sort]');
     if (th) {
       const key = th.dataset.sort;
@@ -1612,34 +1596,37 @@ document.addEventListener('DOMContentLoaded', () => {
     if (row) openInspector(row.entry);
   });
 
-  // ── Inspector close ──
-  document.getElementById('inspector-close').addEventListener('click', closeInspector);
+  // ── Dock: tab switching, close, horizontal resize ──
+  document.querySelector('.dock-tabs').addEventListener('click', e => {
+    const tab = e.target.closest('.dock-tab');
+    if (tab) openDock(tab.dataset.tab);
+  });
+  document.getElementById('dock-close').addEventListener('click', closeDock);
 
-  // ── Inspector resize handle ──
-  const inspectorEl = document.getElementById('inspector');
-  const inspectorHandle = document.getElementById('inspector-resize-handle');
-  const INSPECTOR_H_KEY = 'log-reader-inspector-h';
+  const dockEl = document.getElementById('dock');
+  const dockHandle = document.getElementById('dock-resize-handle');
+  const DOCK_H_KEY = 'log-reader-dock-h';
 
-  const savedInspectorH = localStorage.getItem(INSPECTOR_H_KEY);
-  if (savedInspectorH) inspectorEl.style.height = savedInspectorH + 'px';
+  const savedDockH = localStorage.getItem(DOCK_H_KEY);
+  if (savedDockH) dockEl.style.height = savedDockH + 'px';
 
-  inspectorHandle.addEventListener('mousedown', e => {
+  dockHandle.addEventListener('mousedown', e => {
     e.preventDefault();
     const startY = e.clientY;
-    const startH = inspectorEl.offsetHeight;
+    const startH = dockEl.offsetHeight;
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'ns-resize';
 
     const onMove = ev => {
-      const newH = Math.max(80, Math.min(window.innerHeight * 0.8, startH + (startY - ev.clientY)));
-      inspectorEl.style.height = newH + 'px';
+      const newH = Math.max(120, Math.min(window.innerHeight * 0.6, startH + (startY - ev.clientY)));
+      dockEl.style.height = newH + 'px';
     };
-    const onUp = ev => {
+    const onUp = () => {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
-      localStorage.setItem(INSPECTOR_H_KEY, inspectorEl.offsetHeight);
+      localStorage.setItem(DOCK_H_KEY, dockEl.offsetHeight);
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
@@ -1692,10 +1679,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('range-clear').addEventListener('click', clearRange);
 
-  // ── Keyboard: Esc closes inspector / dropdown ──
+  // ── Keyboard: Esc closes dock / dropdown ──
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      closeInspector();
+      closeDock();
       closeDropdown();
     }
   });
