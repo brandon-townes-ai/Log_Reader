@@ -40,7 +40,7 @@
           <p class="dz-label">Drop log files here</p>
           <p class="dz-sub">or click to browse &mdash; accepts .txt / .log files, a folder, or a whole bag (subfolders searched)</p>
         </div>
-        <input type="file" id="file-input" accept=".txt,.log" multiple tabindex="-1">
+        <input type="file" id="file-input" accept=".txt,.log,.csv,.jsonl,.out" multiple tabindex="-1">
       </div>
 
       <div id="error-banner" class="error-banner hidden" role="alert">
@@ -117,6 +117,11 @@
         <button class="pill" id="lanes-toggle" title="Cycle per-process / per-file timeline lanes">LANES: OFF</button>
       </div>
 
+      <div class="filter-group hidden" id="signals-group">
+        <span class="filter-label" aria-hidden="true">SIGNALS</span>
+        <button class="pill" id="signals-toggle" aria-pressed="false" title="Overlay numeric signals on the timeline">OVERLAY</button>
+      </div>
+
       <div class="filter-group filter-group--search">
         <span class="filter-label" aria-hidden="true">SEARCH</span>
         <label class="search-wrap">
@@ -147,6 +152,13 @@
 
     <div id="latency-panel" class="latency-panel hidden" aria-label="Latency statistics"></div>
 
+    <div id="signals-panel" class="latency-panel signals-panel hidden" aria-label="Signal overlays">
+      <div class="sig-search-row">
+        <input type="text" id="signals-search" class="dropdown-search" placeholder="filter signals…" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="signals-table-wrap" class="signals-table-wrap"></div>
+    </div>
+
     <div class="log-area">
       <div id="log-container" class="log-container" role="log" aria-label="Log entries">
         <div id="spacer-top" aria-hidden="true"></div>
@@ -169,6 +181,7 @@
   </div>
 
   <script src="latency.js"></script>
+  <script src="signals.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

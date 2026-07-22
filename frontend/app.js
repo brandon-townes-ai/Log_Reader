@@ -69,6 +69,14 @@ let selectedEntry    = null;  // entry shown in the inspector (for deep links)
 let pendingHashState = null;  // parsed URL-hash state, applied on next load
 let laneMode         = null;  // null | 'proc' | 'file' — timeline lane rendering
 let clockSkew        = [];    // [{file, offsetMs, tMin, tMax}] flagged by detectClockSkew
+let signalData       = new Map();  // signal name → {t:[], v:[], min, max}
+let signalStats      = [];    // [{name, count, min, mean, max}] for the panel
+let activeSignals    = [];    // names overlaid on the timeline (≤ MAX_ACTIVE_SIGNALS)
+let signalsPanelOpen = false;
+let signalsSortKey   = 'count';
+let signalsSortDir   = -1;
+let signalsFilter    = '';
+let signalsTruncated = false; // a file hit the per-file sample cap
 
 // ── Utilities ────────────────────────────────────────────────
 function hashColor(str) {
@@ -281,6 +289,7 @@ function serializeHash() {
   if (selectedEntry) p.set('sel', `${encodeURIComponent(selectedEntry.file ?? '')}~${selectedEntry.line_number}`);
   if (activeLatencyTag !== null) p.set('lat', activeLatencyTag);
   if (laneMode !== null) p.set('lanes', laneMode);
+  if (activeSignals.length) p.set('sig', activeSignals.map(encodeURIComponent).join(','));
   const str = p.toString();
   history.replaceState(null, '', str === 'v=1' ? location.pathname + location.search : '#' + str);
 }
@@ -302,6 +311,7 @@ function parseHash() {
   }
   if (p.has('lat')) st.lat = p.get('lat');
   if (p.has('lanes')) st.lanes = p.get('lanes');
+  if (p.has('sig')) st.sig = p.get('sig').split(',').filter(Boolean).map(decodeURIComponent);
   return st;
 }
 
@@ -345,6 +355,7 @@ function applyHashState(st) {
     renderLatencyPanel();
   }
   if (st.lanes === 'proc' || st.lanes === 'file') setLaneMode(st.lanes);
+  if (st.sig) activeSignals = st.sig.filter(n => signalData.has(n)).slice(0, MAX_ACTIVE_SIGNALS);
 
   applyFilters();
 
@@ -449,6 +460,112 @@ function renderLatencyPanel() {
   panel.innerHTML = html;
 }
 
+// ── Signals panel + overlay ──────────────────────────────────
+const SIGNAL_COLORS = ['#38bdf8', '#e879f9', '#4ade80', '#fb923c'];
+const MAX_ACTIVE_SIGNALS = SIGNAL_COLORS.length;
+
+function fmtSigVal(v) {
+  if (!isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 1)   return String(+v.toFixed(2));
+  return v === 0 ? '0' : v.toPrecision(3);
+}
+
+function renderSignalsPanel() {
+  const panel = document.getElementById('signals-panel');
+  panel.classList.toggle('hidden', !signalsPanelOpen);
+  if (!signalsPanelOpen) return;
+
+  const q = signalsFilter.toLowerCase();
+  const rows = signalStats
+    .filter(s => !q || s.name.toLowerCase().includes(q))
+    .sort((a, b) => {
+      const va = a[signalsSortKey], vb = b[signalsSortKey];
+      return (va < vb ? -1 : va > vb ? 1 : 0) * signalsSortDir;
+    });
+
+  const cols = [['name','SIGNAL'],['count','COUNT'],['min','MIN'],['mean','MEAN'],['max','MAX']];
+  let html = '<table class="latency-table"><thead><tr>';
+  for (const [key, label] of cols) {
+    const arrow = key === signalsSortKey ? (signalsSortDir < 0 ? ' ▾' : ' ▴') : '';
+    html += `<th data-sort="${key}"${key === 'name' ? ' class="lat-col-tag"' : ''}>${label}${arrow}</th>`;
+  }
+  html += '</tr></thead><tbody>';
+  for (const s of rows) {
+    const ai = activeSignals.indexOf(s.name);
+    html += `<tr data-sig="${esc(s.name)}"${ai >= 0 ? ' class="active"' : ''}>` +
+      `<td class="lat-col-tag"><span class="sig-dot" style="background:${ai >= 0 ? SIGNAL_COLORS[ai] : 'transparent'}"></span>${esc(s.name)}</td>` +
+      `<td>${s.count.toLocaleString()}</td>` +
+      `<td>${fmtSigVal(s.min)}</td><td>${fmtSigVal(s.mean)}</td><td>${fmtSigVal(s.max)}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('signals-table-wrap').innerHTML = html;
+}
+
+function toggleSignalOverlay(name) {
+  const i = activeSignals.indexOf(name);
+  if (i >= 0) activeSignals.splice(i, 1);
+  else {
+    activeSignals.push(name);
+    if (activeSignals.length > MAX_ACTIVE_SIGNALS) activeSignals.shift();
+  }
+  renderSignalsPanel();
+  renderTimeline();
+  serializeHash();
+}
+
+function toggleSignalsPanel() {
+  signalsPanelOpen = !signalsPanelOpen;
+  const btn = document.getElementById('signals-toggle');
+  btn.classList.toggle('active', signalsPanelOpen);
+  btn.setAttribute('aria-pressed', String(signalsPanelOpen));
+  renderSignalsPanel();
+}
+
+// Per-pixel min/max strips, each signal normalized to its own [min, max] —
+// units differ, so shapes (spikes, trends) are what's comparable, not scale
+function drawSignalOverlay(ctx, w, h) {
+  if (!activeSignals.length || tEnd <= tStart) return;
+  const span = tEnd - tStart;
+  const nb = Math.max(1, Math.floor(w));
+  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.textBaseline = 'top';
+
+  activeSignals.forEach((name, idx) => {
+    const g = signalData.get(name);
+    if (!g || !g.t.length) return;
+    const color = SIGNAL_COLORS[idx];
+    const range = (g.max - g.min) || 1;
+    const mins = new Float64Array(nb).fill(Infinity);
+    const maxs = new Float64Array(nb).fill(-Infinity);
+    for (let i = 0; i < g.t.length; i++) {
+      let b = Math.floor(((g.t[i] - tStart) / span) * nb);
+      if (b < 0) b = 0; else if (b >= nb) b = nb - 1;
+      const v = g.v[i];
+      if (v < mins[b]) mins[b] = v;
+      if (v > maxs[b]) maxs[b] = v;
+    }
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.9;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < nb; i++) {
+      if (mins[i] === Infinity) continue;
+      const yLo = h - 3 - ((mins[i] - g.min) / range) * (h - 8);
+      const yHi = h - 3 - ((maxs[i] - g.min) / range) * (h - 8);
+      ctx.moveTo(i + 0.5, yLo);
+      ctx.lineTo(i + 0.5, Math.min(yHi, yLo - 1));  // ≥1px so flat stretches stay visible
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+    const label = `${name} [${fmtSigVal(g.min)}…${fmtSigVal(g.max)}]`;
+    const tw = (ctx.measureText(label) || { width: label.length * 6 }).width;
+    ctx.fillText(label, Math.max(4, w - tw - 6), 3 + idx * 10);
+  });
+}
+
 function selectLatencyTag(tag) {
   activeLatencyTag = activeLatencyTag === tag ? null : tag;
   renderLatencyPanel();
@@ -473,7 +590,7 @@ function toggleLatencyPanel() {
 function renderStats() {
   const bar = document.getElementById('stats-bar');
   bar.innerHTML = '';
-  if (!allEntries.length) return;
+  if (!allEntries.length && !signalData.size) return;
 
   const levelCounts = {};
   const procCounts  = {};
@@ -537,6 +654,21 @@ function renderStats() {
     frag.appendChild(chip);
   }
 
+  // Numeric signals — toggles the signals panel
+  if (signalData.size) {
+    frag.appendChild(sep());
+    const sig = document.createElement('span');
+    sig.className = 'stat-chip stat-chip--level';
+    sig.title = 'Toggle signals panel' +
+      (signalsTruncated ? ' — ⚠ sample cap hit, some samples were dropped' : '');
+    sig.innerHTML =
+      `<span class="stat-dot" style="background:${SIGNAL_COLORS[0]}"></span>` +
+      `<span class="stat-label">SIG</span>` +
+      `<span class="stat-val">${signalData.size.toLocaleString()} signal${signalData.size > 1 ? 's' : ''}${signalsTruncated ? ' ⚠' : ''}</span>`;
+    sig.addEventListener('click', toggleSignalsPanel);
+    frag.appendChild(sig);
+  }
+
   // Time span
   frag.appendChild(sep());
   const span = document.createElement('span');
@@ -584,10 +716,10 @@ function focusProcess(p) {
 function renderTimeline() {
   const canvas = document.getElementById('timeline-canvas');
   const barEl  = document.getElementById('timeline-bar');
-  if (!canvas || !barEl || !allEntries.length || tEnd <= tStart) return;
+  if (!canvas || !barEl || (!allEntries.length && !signalData.size) || tEnd <= tStart) return;
 
   // Lanes mode grows the bar to fit; reset to the CSS default when off
-  const lanes = laneMode !== null ? computeLanes() : null;
+  const lanes = laneMode !== null && allEntries.length ? computeLanes() : null;
   barEl.style.height = lanes
     ? Math.max(56, Math.min(160, lanes.length * 16 + 8)) + 'px'
     : '';
@@ -598,7 +730,11 @@ function renderTimeline() {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
 
-  if (lanes) { renderTimelineLanes(ctx, w, h, lanes); return; }
+  if (lanes) {
+    renderTimelineLanes(ctx, w, h, lanes);
+    drawSignalOverlay(ctx, w, h);
+    return;
+  }
 
   const nb = Math.max(1, Math.floor(w));   // ~1px buckets
   const span = tEnd - tStart;
@@ -660,6 +796,8 @@ function renderTimeline() {
     ctx.textBaseline = 'top';
     ctx.fillText(`max ${fmtMs(maxLat)}`, 4, 3);
   }
+
+  drawSignalOverlay(ctx, w, h);
 }
 
 const MAX_PROC_LANES = 8;  // proc mode: top N by count, rest folded into 'other'
@@ -1028,20 +1166,24 @@ async function handleUpload(files) {
   const worker = new Worker('/parser.worker.js');
   try {
     const allEntries = [];
+    const signalChunks = [];
+    let truncated = false;
     for (const file of uploadedFiles) {
-      const entries = await new Promise((resolve, reject) => {
+      const data = await new Promise((resolve, reject) => {
         worker.onmessage = ({ data }) => {
-          if (data.type === 'done')  resolve(data.entries);
+          if (data.type === 'done')  resolve(data);
           if (data.type === 'error') reject(new Error(data.message));
         };
         worker.onerror = e => reject(new Error(e.message));
         worker.postMessage({ file });
       });
-      for (const e of entries) { e.file = file.name; allEntries.push(e); }
+      for (const e of data.entries) { e.file = file.name; allEntries.push(e); }
+      if (data.signals) signalChunks.push(...data.signals);
+      if (data.truncated) truncated = true;
     }
     allEntries.sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
     showLoading(false);
-    loadViewer(allEntries);
+    loadViewer(allEntries, signalChunks, truncated);
   } catch (err) {
     showLoading(false);
     showError(String(err.message));
@@ -1050,17 +1192,59 @@ async function handleUpload(files) {
   }
 }
 
-function loadViewer(entries) {
+function loadViewer(entries, signals = [], truncated = false) {
   // Precompute numeric epoch-ms per entry + dataset bounds (Feature 0)
   for (const e of entries) {
     e._t = Date.parse(e.timestamp.slice(0, 23).replace(' ', 'T'));
   }
-  tStart = entries.length ? entries[0]._t : 0;
-  tEnd   = entries.length ? entries[0]._t : 0;
+
+  // Numeric signals: merge chunks across files, sort by time, compute stats
+  signalData = new Map();
+  for (const s of signals) {
+    let g = signalData.get(s.signal);
+    if (!g) signalData.set(s.signal, g = { t: [], v: [] });
+    for (let i = 0; i < s.t.length; i++) { g.t.push(s.t[i]); g.v.push(s.v[i]); }
+  }
+  signalStats = [];
+  for (const [name, g] of signalData) {
+    let sorted = true;
+    for (let i = 1; i < g.t.length; i++) if (g.t[i] < g.t[i - 1]) { sorted = false; break; }
+    if (!sorted) {
+      const idx = g.t.map((_, i) => i).sort((a, b) => g.t[a] - g.t[b]);
+      g.t = idx.map(i => g.t[i]);
+      g.v = idx.map(i => g.v[i]);
+    }
+    let min = Infinity, max = -Infinity, sum = 0;
+    for (const v of g.v) { if (v < min) min = v; if (v > max) max = v; sum += v; }
+    g.min = min; g.max = max;
+    signalStats.push({ name, count: g.v.length, min, mean: sum / g.v.length, max });
+  }
+  activeSignals    = [];
+  signalsTruncated = truncated;
+  signalsFilter    = '';
+  signalsPanelOpen = false;
+  const sigBtn = document.getElementById('signals-toggle');
+  sigBtn.classList.remove('active');
+  sigBtn.setAttribute('aria-pressed', 'false');
+  document.getElementById('signals-search').value = '';
+  document.getElementById('signals-group').classList.toggle('hidden', !signalData.size);
+  renderSignalsPanel();
+
+  // dataset bounds — from entries; a signals-only drop falls back to signal range
+  tStart = Infinity;
+  tEnd   = -Infinity;
   for (const e of entries) {
     if (e._t < tStart) tStart = e._t;
     if (e._t > tEnd)   tEnd   = e._t;
   }
+  if (!entries.length) {
+    for (const [, g] of signalData) {
+      if (!g.t.length) continue;
+      if (g.t[0] < tStart)              tStart = g.t[0];
+      if (g.t[g.t.length - 1] > tEnd)   tEnd   = g.t[g.t.length - 1];
+    }
+  }
+  if (!isFinite(tStart)) { tStart = 0; tEnd = 0; }
 
   allEntries      = entries;
   filteredEntries = entries;
@@ -1129,6 +1313,9 @@ function showUpload() {
   document.getElementById('upload-screen').classList.add('active');
   allEntries = filteredEntries = [];
   uploadedFiles = [];
+  signalData = new Map();
+  signalStats = [];
+  activeSignals = [];
 }
 
 function showLoading(on) {
@@ -1154,14 +1341,22 @@ function readDirEntries(reader) {
 }
 
 function isLogFile(name) {
-  return name.endsWith('.txt') || name.endsWith('.log');
+  return /\.(txt|log)$/i.test(name);
+}
+
+function isSignalFile(name) {
+  return /\.(csv|jsonl|out)$/i.test(name);
+}
+
+function isSupportedFile(name) {
+  return isLogFile(name) || isSignalFile(name);
 }
 
 const MAX_DIR_DEPTH = 5;  // recursion guard — a bag root is logs/ one level down
 
 async function collectTxtFiles(entry, depth = 0) {
   if (entry.isFile) {
-    if (isLogFile(entry.name)) return [await fsEntryToFile(entry)];
+    if (isSupportedFile(entry.name)) return [await fsEntryToFile(entry)];
     return [];
   }
   if (entry.isDirectory && depth < MAX_DIR_DEPTH && !entry.name.startsWith('.')) {
@@ -1365,6 +1560,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Timeline lanes toggle ──
   document.getElementById('lanes-toggle').addEventListener('click', cycleLaneMode);
+
+  // ── Signals panel: toggle pill, search, sortable headers, row click to overlay ──
+  document.getElementById('signals-toggle').addEventListener('click', toggleSignalsPanel);
+  document.getElementById('signals-search').addEventListener('input', e => {
+    signalsFilter = e.target.value;
+    renderSignalsPanel();
+  });
+  document.getElementById('signals-panel').addEventListener('click', e => {
+    const th = e.target.closest('th[data-sort]');
+    if (th) {
+      const key = th.dataset.sort;
+      if (signalsSortKey === key) signalsSortDir = -signalsSortDir;
+      else { signalsSortKey = key; signalsSortDir = key === 'name' ? 1 : -1; }
+      renderSignalsPanel();
+      return;
+    }
+    const tr = e.target.closest('tr[data-sig]');
+    if (tr) toggleSignalOverlay(tr.dataset.sig);
+  });
 
   // ── Latency panel: toggle pill, sortable headers, row click to filter ──
   document.getElementById('latency-toggle').addEventListener('click', toggleLatencyPanel);

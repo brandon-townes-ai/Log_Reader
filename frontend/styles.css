@@ -716,6 +716,38 @@ mark {
 .latency-table tbody tr.active { background: var(--accent-dim); }
 .latency-table tbody tr.active td { color: var(--accent); }
 
+/* ── Signals panel ──────────────────────────────────────────── */
+#signals-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.signals-panel {
+  display: flex;
+  flex-direction: column;
+  overflow-y: hidden;   /* the table wrap scrolls, so the search row stays put */
+}
+.signals-panel.hidden { display: none; }
+.sig-search-row {
+  flex-shrink: 0;
+  padding: 6px 10px 4px;
+  border-bottom: 1px solid var(--border-dim);
+}
+.sig-search-row .dropdown-search { width: 240px; }
+.signals-table-wrap { overflow-y: auto; }
+.signals-table-wrap::-webkit-scrollbar { width: 4px; }
+.signals-table-wrap::-webkit-scrollbar-track { background: transparent; }
+.signals-table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.sig-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+  margin-right: 6px;
+  border: 1px solid var(--border);
+  vertical-align: -1px;
+}
+
 /* ── Exclude search field ───────────────────────────────────── */
 .search-wrap--exclude { margin-left: 6px; }
 .search-wrap--exclude:focus-within {

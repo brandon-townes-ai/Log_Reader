@@ -1,0 +1,6 @@
+timestamp,signal,value
+2026-07-01 10:00:00.200000,/mine_autonomy/controls/tracking_control_metric.error_metrics.cross_track_m,0.12
+2026-07-01 10:00:00.700000,/mine_autonomy/controls/tracking_control_metric.error_metrics.cross_track_m,0.35
+2026-07-01 10:00:01.200000,/mine_autonomy/controls/tracking_control_metric.error_metrics.cross_track_m,0.28
+2026-07-01 10:00:00.500000,/behavior_status/distance_to_goal_m,42.0
+2026-07-01 10:00:01.000000,/behavior_status/distance_to_goal_m,17.5

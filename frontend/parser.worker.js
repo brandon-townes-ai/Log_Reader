@@ -1,6 +1,7 @@
 'use strict';
 
 importScripts('/latency.js');
+importScripts('/signals.js');
 
 // ── ROS log parser ────────────────────────────────────────────
 const ANSI_RE  = /\x1b\[[0-9;]*[A-Za-z]|\[\d[0-9;]*m/g;
@@ -249,12 +250,22 @@ function isFaultMonitorFormat(text) {
 // ── Worker entry point ────────────────────────────────────────
 self.onmessage = async ({ data }) => {
   try {
-    const text    = await data.file.text();
+    const text = await data.file.text();
+
+    // Numeric signal files (.csv / .jsonl / telegraf .out) produce
+    // time-series samples instead of log entries
+    const signalParser = signalParserFor(data.file.name, text);
+    if (signalParser) {
+      const { signals, truncated } = signalParser();
+      self.postMessage({ type: 'done', entries: [], signals, truncated });
+      return;
+    }
+
     const entries = isDiagnosticFormat(text)  ? parseDiagText(text)
                 : isFaultMonitorFormat(text) ? parseFaultMonitorText(text)
                 : parseRosText(text);
     for (const e of entries) extractLatency(e);
-    self.postMessage({ type: 'done', entries });
+    self.postMessage({ type: 'done', entries, signals: [], truncated: false });
   } catch (err) {
     self.postMessage({ type: 'error', message: err.message });
   }

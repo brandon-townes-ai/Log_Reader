@@ -1,4 +1,4 @@
-.PHONY: install run dev deploy clean venv cli
+.PHONY: install run dev deploy clean venv cli test
 
 venv:
 	test -d venv || python3 -m venv venv
@@ -17,6 +17,11 @@ deploy:
 
 cli: install
 	./venv/bin/python -m src.cli $(ARGS)
+
+test: install
+	./venv/bin/pip install -q -r requirements-dev.txt
+	./venv/bin/python -m pytest tests/
+	node --test tests/
 
 clean:
 	rm -rf venv
