@@ -1,5 +1,7 @@
 'use strict';
 
+importScripts('/latency.js');
+
 // ── ROS log parser ────────────────────────────────────────────
 const ANSI_RE  = /\x1b\[[0-9;]*[A-Za-z]|\[\d[0-9;]*m/g;
 const ENTRY_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\](?:\[([^\]]*)\])? ?(.*)/;
@@ -251,6 +253,7 @@ self.onmessage = async ({ data }) => {
     const entries = isDiagnosticFormat(text)  ? parseDiagText(text)
                 : isFaultMonitorFormat(text) ? parseFaultMonitorText(text)
                 : parseRosText(text);
+    for (const e of entries) extractLatency(e);
     self.postMessage({ type: 'done', entries });
   } catch (err) {
     self.postMessage({ type: 'error', message: err.message });

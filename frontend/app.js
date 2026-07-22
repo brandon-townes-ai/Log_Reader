@@ -23,7 +23,7 @@ function toggleTheme() {
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
 // ── Version ──────────────────────────────────────────────────
-const VERSION = 'v1.0.4';
+const VERSION = 'v1.0.5';
 
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
@@ -59,6 +59,16 @@ let expandedGroups  = new Set();
 let tStart          = 0;      // dataset time bounds (epoch ms)
 let tEnd            = 0;
 let uploadedFiles   = [];
+let latencyStats     = [];    // [{tag, count, mean, p50, p95, max}] from latency.js
+let latencySamples   = [];    // entries with latency_ms, in timestamp order
+let latencyPanelOpen = false;
+let latencySortKey   = 'p95';
+let latencySortDir   = -1;    // -1 desc, 1 asc
+let activeLatencyTag = null;  // string | null
+let selectedEntry    = null;  // entry shown in the inspector (for deep links)
+let pendingHashState = null;  // parsed URL-hash state, applied on next load
+let laneMode         = null;  // null | 'proc' | 'file' — timeline lane rendering
+let clockSkew        = [];    // [{file, offsetMs, tMin, tMax}] flagged by detectClockSkew
 
 // ── Utilities ────────────────────────────────────────────────
 function hashColor(str) {
@@ -249,6 +259,105 @@ function buildDisplayRows() {
   }
 }
 
+// ── Deep links (URL hash) ────────────────────────────────────
+// The hash encodes view state only — files are local, so a deep link
+// applies once the same bag is dropped again. Keys referencing absent
+// data are silently ignored.
+function serializeHash() {
+  if (!allEntries.length) return;
+  const p = new URLSearchParams();
+  p.set('v', '1');
+  if (activeLevels !== null)    p.set('lv', [...activeLevels].join(','));
+  if (activeProcesses !== null) p.set('pr', [...activeProcesses].map(encodeURIComponent).join(','));
+  const q = document.getElementById('search-input').value;
+  const x = document.getElementById('exclude-input').value;
+  if (q.trim()) p.set('q', q);
+  if (x.trim()) p.set('x', x);
+  if (collapseRepeats) p.set('col', '1');
+  if (rangeStart !== null) {
+    p.set('t0', Math.round(rangeStart));
+    p.set('t1', Math.round(rangeEnd));
+  }
+  if (selectedEntry) p.set('sel', `${encodeURIComponent(selectedEntry.file ?? '')}~${selectedEntry.line_number}`);
+  if (activeLatencyTag !== null) p.set('lat', activeLatencyTag);
+  if (laneMode !== null) p.set('lanes', laneMode);
+  const str = p.toString();
+  history.replaceState(null, '', str === 'v=1' ? location.pathname + location.search : '#' + str);
+}
+
+function parseHash() {
+  if (location.hash.length < 2) return null;
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.get('v') !== '1') return null;
+  const st = {};
+  if (p.has('lv')) st.levels = p.get('lv').split(',').filter(Boolean);
+  if (p.has('pr')) st.processes = p.get('pr').split(',').filter(Boolean).map(decodeURIComponent);
+  if (p.has('q')) st.q = p.get('q');
+  if (p.has('x')) st.x = p.get('x');
+  st.col = p.get('col') === '1';
+  if (p.has('t0') && p.has('t1')) { st.t0 = +p.get('t0'); st.t1 = +p.get('t1'); }
+  if (p.has('sel')) {
+    const raw = p.get('sel'), i = raw.lastIndexOf('~');
+    if (i > -1) st.sel = { file: decodeURIComponent(raw.slice(0, i)), line: +raw.slice(i + 1) };
+  }
+  if (p.has('lat')) st.lat = p.get('lat');
+  if (p.has('lanes')) st.lanes = p.get('lanes');
+  return st;
+}
+
+function applyHashState(st) {
+  if (st.levels) {
+    const valid = st.levels.map(canonLevel).filter(lv => lv in LEVEL_COLORS);
+    if (valid.length) { activeLevels = new Set(valid); syncLevelPills(); }
+  }
+  if (st.processes) {
+    const present = new Set(allEntries.map(e => e.process));
+    const valid = st.processes.filter(pr => present.has(pr));
+    if (valid.length) buildProcessDropdown(new Set(valid));
+  }
+  if (st.q) {
+    const input = document.getElementById('search-input');
+    input.value = st.q;
+    searchRegex = compileRegex(st.q, input.closest('.search-wrap'));
+  }
+  if (st.x) {
+    const input = document.getElementById('exclude-input');
+    input.value = st.x;
+    excludeRegex = compileRegex(st.x, input.closest('.search-wrap'));
+  }
+  if (st.col) {
+    collapseRepeats = true;
+    const btn = document.getElementById('collapse-toggle');
+    btn.classList.add('active');
+    btn.setAttribute('aria-pressed', 'true');
+  }
+  if (st.t0 != null && st.t1 != null && st.t1 > st.t0 && st.t0 <= tEnd && st.t1 >= tStart) {
+    rangeStart = Math.max(tStart, st.t0);
+    rangeEnd   = Math.min(tEnd, st.t1);
+    showRangeReadout();
+  }
+  if (st.lat && latencyStats.some(s => s.tag === st.lat)) {
+    activeLatencyTag = st.lat;
+    latencyPanelOpen = true;
+    const btn = document.getElementById('latency-toggle');
+    btn.classList.add('active');
+    btn.setAttribute('aria-pressed', 'true');
+    renderLatencyPanel();
+  }
+  if (st.lanes === 'proc' || st.lanes === 'file') setLaneMode(st.lanes);
+
+  applyFilters();
+
+  if (st.sel) {
+    const idx = displayRows.findIndex(r =>
+      (r.entry.file ?? '') === st.sel.file && r.entry.line_number === st.sel.line);
+    if (idx >= 0) {
+      document.getElementById('log-container').scrollTop = idx * ROW_H;
+      openInspector(displayRows[idx].entry);
+    }
+  }
+}
+
 // ── Filters ──────────────────────────────────────────────────
 function applyFilters() {
   expandedGroups.clear();  // group ids shift when the filtered set changes
@@ -256,6 +365,7 @@ function applyFilters() {
   filteredEntries = allEntries.filter(e => {
     if (activeLevels    !== null && !activeLevels.has(canonLevel(e.level))) return false;
     if (activeProcesses !== null && !activeProcesses.has(e.process))        return false;
+    if (activeLatencyTag !== null && e.latency_tag !== activeLatencyTag)    return false;
     if (rangeStart !== null && (e._t < rangeStart || e._t > rangeEnd))      return false;
     if (searchRegex  && !searchRegex.test(e.raw))  return false;
     if (excludeRegex &&  excludeRegex.test(e.raw)) return false;
@@ -267,6 +377,7 @@ function applyFilters() {
   renderScrollMarkers();
   document.getElementById('log-container').scrollTop = 0;
   renderRows();
+  serializeHash();
 }
 
 function toggleLevel(lv) {
@@ -300,6 +411,62 @@ function fmtDuration(ms) {
   const s = Math.round(ms / 1000);
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return h ? `${h}h ${m}m ${sec}s` : m ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+// Human-friendly duration for latency values
+function fmtMs(ms) {
+  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+  if (ms >= 1)    return ms.toFixed(ms >= 100 ? 0 : 1) + 'ms';
+  return (ms * 1000).toFixed(0) + 'µs';
+}
+
+// ── Latency panel ────────────────────────────────────────────
+function renderLatencyPanel() {
+  const panel = document.getElementById('latency-panel');
+  panel.classList.toggle('hidden', !latencyPanelOpen);
+  if (!latencyPanelOpen) return;
+
+  const dir = latencySortDir;
+  const rows = [...latencyStats].sort((a, b) => {
+    const va = a[latencySortKey], vb = b[latencySortKey];
+    return (va < vb ? -1 : va > vb ? 1 : 0) * dir;
+  });
+
+  const cols = [['tag','TAG'],['count','COUNT'],['mean','MEAN'],['p50','P50'],['p95','P95'],['max','MAX']];
+  let html = '<table class="latency-table"><thead><tr>';
+  for (const [key, label] of cols) {
+    const arrow = key === latencySortKey ? (dir < 0 ? ' ▾' : ' ▴') : '';
+    html += `<th data-sort="${key}"${key === 'tag' ? ' class="lat-col-tag"' : ''}>${label}${arrow}</th>`;
+  }
+  html += '</tr></thead><tbody>';
+  for (const s of rows) {
+    html += `<tr data-tag="${esc(s.tag)}"${s.tag === activeLatencyTag ? ' class="active"' : ''}>` +
+      `<td class="lat-col-tag">${esc(s.tag)}</td>` +
+      `<td>${s.count.toLocaleString()}</td>` +
+      `<td>${fmtMs(s.mean)}</td><td>${fmtMs(s.p50)}</td><td>${fmtMs(s.p95)}</td><td>${fmtMs(s.max)}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  panel.innerHTML = html;
+}
+
+function selectLatencyTag(tag) {
+  activeLatencyTag = activeLatencyTag === tag ? null : tag;
+  renderLatencyPanel();
+  applyFilters();
+  renderTimeline();
+}
+
+function toggleLatencyPanel() {
+  latencyPanelOpen = !latencyPanelOpen;
+  const btn = document.getElementById('latency-toggle');
+  btn.classList.toggle('active', latencyPanelOpen);
+  btn.setAttribute('aria-pressed', String(latencyPanelOpen));
+  if (!latencyPanelOpen && activeLatencyTag !== null) {
+    activeLatencyTag = null;  // closing the panel clears its filter — no hidden state
+    applyFilters();
+  }
+  renderLatencyPanel();
+  renderTimeline();
 }
 
 // ── Stats Bar ────────────────────────────────────────────────
@@ -336,6 +503,39 @@ function renderStats() {
     chip.addEventListener('click', () => toggleLevel(lv));
     frag.appendChild(chip);
   });
+
+  // Latency summary — toggles the latency panel
+  if (latencySamples.length) {
+    frag.appendChild(sep());
+    const lat = document.createElement('span');
+    lat.className = 'stat-chip stat-chip--level';
+    lat.title = 'Toggle latency panel';
+    lat.innerHTML =
+      `<span class="stat-dot" style="background:var(--cyan)"></span>` +
+      `<span class="stat-label">LAT</span>` +
+      `<span class="stat-val">${latencySamples.length.toLocaleString()} samples · ${latencyStats.length} tags</span>`;
+    lat.addEventListener('click', toggleLatencyPanel);
+    frag.appendChild(lat);
+  }
+
+  // Clock-skew warning — click to switch the timeline to file lanes
+  if (clockSkew.length) {
+    frag.appendChild(sep());
+    const chip = document.createElement('span');
+    chip.className = 'stat-chip stat-chip--level';
+    chip.title = clockSkew.map(s =>
+      `${s.file} starts +${fmtDuration(s.offsetMs)} after the earliest file (${fmtClock(s.tMin)}→${fmtClock(s.tMax)})`
+    ).join('\n') + '\nClick to show file lanes';
+    chip.innerHTML =
+      `<span class="stat-label" style="color:${LEVEL_COLORS.WARN}">⚠ CLOCK SKEW</span>` +
+      `<span class="stat-val" style="color:${LEVEL_COLORS.WARN}">${clockSkew.length} file${clockSkew.length > 1 ? 's' : ''}</span>`;
+    chip.addEventListener('click', () => {
+      setLaneMode('file');
+      renderTimeline();
+      serializeHash();
+    });
+    frag.appendChild(chip);
+  }
 
   // Time span
   frag.appendChild(sep());
@@ -380,17 +580,25 @@ function focusProcess(p) {
   applyFilters();
 }
 
-// ── Timeline histogram ───────────────────────────────────────
+// ── Timeline histogram / lanes ───────────────────────────────
 function renderTimeline() {
   const canvas = document.getElementById('timeline-canvas');
   const barEl  = document.getElementById('timeline-bar');
   if (!canvas || !barEl || !allEntries.length || tEnd <= tStart) return;
+
+  // Lanes mode grows the bar to fit; reset to the CSS default when off
+  const lanes = laneMode !== null ? computeLanes() : null;
+  barEl.style.height = lanes
+    ? Math.max(56, Math.min(160, lanes.length * 16 + 8)) + 'px'
+    : '';
 
   const w = barEl.clientWidth, h = barEl.clientHeight;
   if (!w || !h) return;
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
+
+  if (lanes) { renderTimelineLanes(ctx, w, h, lanes); return; }
 
   const nb = Math.max(1, Math.floor(w));   // ~1px buckets
   const span = tEnd - tStart;
@@ -426,6 +634,154 @@ function renderTimeline() {
     seg(bk.warn, LEVEL_COLORS.WARN);
     seg(bk.err,  LEVEL_COLORS.ERROR);
   }
+
+  // Latency scatter overlay (log-scale Y) while the latency panel is open
+  if (latencyPanelOpen && latencySamples.length) {
+    let maxLat = 0;
+    for (const e of latencySamples) if (e.latency_ms > maxLat) maxLat = e.latency_ms;
+    const denom  = Math.log1p(maxLat) || 1;
+    const accent = getComputedStyle(document.documentElement)
+      .getPropertyValue('--accent').trim() || '#f0b429';
+    const baseAlpha = activeLatencyTag === null ? 'aa' : '44';
+    const drawPass = activePass => {
+      ctx.fillStyle = activePass ? accent : accent + baseAlpha;
+      for (const e of latencySamples) {
+        const isActive = activeLatencyTag !== null && e.latency_tag === activeLatencyTag;
+        if (activePass !== isActive) continue;
+        const x = Math.min(w - 2, ((e._t - tStart) / span) * w);
+        const y = h - 2 - (Math.log1p(e.latency_ms) / denom) * (h - 4);
+        ctx.fillRect(x, y, 2, 2);
+      }
+    };
+    drawPass(false);
+    if (activeLatencyTag !== null) drawPass(true);
+    ctx.fillStyle = accent;
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`max ${fmtMs(maxLat)}`, 4, 3);
+  }
+}
+
+const MAX_PROC_LANES = 8;  // proc mode: top N by count, rest folded into 'other'
+
+function computeLanes() {
+  if (laneMode === 'file') {
+    const keys = [...new Set(allEntries.map(e => e.file ?? '(unknown)'))].sort();
+    return keys.map(k => ({ key: k, match: e => (e.file ?? '(unknown)') === k }));
+  }
+  const counts = {};
+  for (const e of allEntries) counts[e.process] = (counts[e.process] || 0) + 1;
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_PROC_LANES).map(([p]) => p);
+  const topSet = new Set(top);
+  const lanes = top.map(p => ({ key: p, match: e => e.process === p }));
+  if (Object.keys(counts).length > top.length) {
+    lanes.push({ key: 'other', match: e => !topSet.has(e.process) });
+  }
+  return lanes;
+}
+
+function renderTimelineLanes(ctx, w, h, lanes) {
+  const span  = tEnd - tStart;
+  const nb    = Math.max(1, Math.floor(w));
+  const laneH = h / lanes.length;
+  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.textBaseline = 'top';
+
+  lanes.forEach((lane, li) => {
+    const y0 = li * laneH;
+    const buckets = new Array(nb).fill(0);
+    const worst   = new Array(nb).fill(0);  // 0 none, 1 warn, 2 error/fatal
+    let tMin = Infinity, tMax = -Infinity, count = 0;
+
+    for (const e of allEntries) {
+      if (!lane.match(e)) continue;
+      count++;
+      if (e._t < tMin) tMin = e._t;
+      if (e._t > tMax) tMax = e._t;
+      let b = Math.floor(((e._t - tStart) / span) * nb);
+      if (b < 0) b = 0; else if (b >= nb) b = nb - 1;
+      buckets[b]++;
+      const lv = canonLevel(e.level);
+      if (lv === 'ERROR' || lv === 'FATAL') worst[b] = 2;
+      else if (lv === 'WARN' && worst[b] < 1) worst[b] = 1;
+    }
+    if (!count) return;
+
+    let max = 1;
+    for (const c of buckets) if (c > max) max = c;
+    const color = hashColor(lane.key);
+
+    // Faint [tMin, tMax] extent strip — makes clock skew between sources visible
+    const xa = ((tMin - tStart) / span) * w;
+    const xb = ((tMax - tStart) / span) * w;
+    ctx.fillStyle = color + '22';
+    ctx.fillRect(xa, y0 + 1, Math.max(1, xb - xa), laneH - 2);
+
+    // Density strip; WARN/ERROR buckets over-plotted in level colors
+    for (let i = 0; i < nb; i++) {
+      if (!buckets[i]) continue;
+      if (worst[i] === 2)      ctx.fillStyle = LEVEL_COLORS.ERROR;
+      else if (worst[i] === 1) ctx.fillStyle = LEVEL_COLORS.WARN;
+      else {
+        const alpha = Math.round(40 + (buckets[i] / max) * 215).toString(16).padStart(2, '0');
+        ctx.fillStyle = color + alpha;
+      }
+      ctx.fillRect(i, y0 + 2, 1, laneH - 4);
+    }
+
+    ctx.fillStyle = color;
+    ctx.fillText(lane.key, 4, y0 + 3);
+  });
+}
+
+function setLaneMode(mode) {
+  laneMode = mode;
+  const btn = document.getElementById('lanes-toggle');
+  btn.textContent = 'LANES: ' + (mode === null ? 'OFF' : mode.toUpperCase());
+  btn.classList.toggle('active', mode !== null);
+}
+
+function cycleLaneMode() {
+  setLaneMode(laneMode === null ? 'proc' : laneMode === 'proc' ? 'file' : null);
+  renderTimeline();
+  serializeHash();
+}
+
+// ── Clock-skew detection ─────────────────────────────────────
+const SKEW_MIN_OFFSET_MS  = 60_000;  // heuristic: file starts >60s after the earliest…
+const SKEW_MAX_OVERLAP    = 0.5;     // …and overlaps the others' span by <50%
+
+function detectClockSkew(entries) {
+  const files = new Map();  // file → {tMin, tMax}
+  for (const e of entries) {
+    const f = e.file ?? '(unknown)';
+    const cur = files.get(f);
+    if (!cur) files.set(f, { tMin: e._t, tMax: e._t });
+    else {
+      if (e._t < cur.tMin) cur.tMin = e._t;
+      if (e._t > cur.tMax) cur.tMax = e._t;
+    }
+  }
+  if (files.size < 2) return [];
+  const minStart = Math.min(...[...files.values()].map(v => v.tMin));
+  const flagged = [];
+  for (const [f, v] of files) {
+    const offset = v.tMin - minStart;
+    if (offset <= SKEW_MIN_OFFSET_MS) continue;
+    let oMin = Infinity, oMax = -Infinity;
+    for (const [g, u] of files) {
+      if (g === f) continue;
+      if (u.tMin < oMin) oMin = u.tMin;
+      if (u.tMax > oMax) oMax = u.tMax;
+    }
+    const fileSpan = Math.max(1, v.tMax - v.tMin);
+    const overlap  = Math.max(0, Math.min(v.tMax, oMax) - Math.max(v.tMin, oMin));
+    if (overlap / fileSpan < SKEW_MAX_OVERLAP) {
+      flagged.push({ file: f, offsetMs: offset, tMin: v.tMin, tMax: v.tMax });
+    }
+  }
+  return flagged;
 }
 
 function jumpToTime(t) {
@@ -480,6 +836,24 @@ function clearRange() {
   applyFilters();
 }
 
+// Rebuild the .timeline-selection div from rangeStart/rangeEnd — used when
+// a range is restored from a deep link rather than drawn by the mouse.
+function drawRangeSelection() {
+  document.querySelector('.timeline-selection')?.remove();
+  if (rangeStart === null || tEnd <= tStart) return;
+  const bar = document.getElementById('timeline-bar');
+  const w = bar.clientWidth;
+  if (!w) return;
+  const span = tEnd - tStart;
+  const a = ((rangeStart - tStart) / span) * w;
+  const b = ((rangeEnd   - tStart) / span) * w;
+  const el = document.createElement('div');
+  el.className = 'timeline-selection';
+  el.style.left  = Math.min(a, b) + 'px';
+  el.style.width = Math.abs(b - a) + 'px';
+  bar.appendChild(el);
+}
+
 // ── Inspector panel ──────────────────────────────────────────
 function fallbackCopy(text, onSuccess) {
   const ta = document.createElement('textarea');
@@ -504,6 +878,9 @@ function openInspector(entry) {
   ];
   if (entry.count    != null) metaFields.push(['Count',   entry.count]);
   if (entry.age      != null) metaFields.push(['Age',     entry.age]);
+  if (entry.latency_ms != null) {
+    metaFields.push(['Latency', `${fmtMs(entry.latency_ms)} — ${entry.latency_tag} (${entry.latency_pattern})`]);
+  }
 
   let html = metaFields.map(([k, v]) =>
     `<div class="insp-field"><div class="insp-key">${esc(k)}</div>` +
@@ -542,10 +919,16 @@ function openInspector(entry) {
   });
 
   document.getElementById('inspector').classList.remove('hidden');
+  selectedEntry = entry;
+  serializeHash();
 }
 
 function closeInspector() {
   document.getElementById('inspector').classList.add('hidden');
+  if (selectedEntry !== null) {
+    selectedEntry = null;
+    serializeHash();
+  }
 }
 
 // ── Level Pills ──────────────────────────────────────────────
@@ -559,7 +942,7 @@ function syncLevelPills() {
 }
 
 // ── Process Dropdown ─────────────────────────────────────────
-function buildProcessDropdown() {
+function buildProcessDropdown(preselected = null) {
   const processes = [...new Set(allEntries.map(e => e.process))].sort();
   const menu      = document.getElementById('dropdown-menu');
   menu.innerHTML  = '';
@@ -585,10 +968,11 @@ function buildProcessDropdown() {
   });
   menu.appendChild(searchInput);
 
-  menu.appendChild(mkItem('__ALL__', 'All processes'));
+  menu.appendChild(mkItem('__ALL__', 'All processes', preselected === null));
   processes.forEach(p => {
     const color = hashColor(p);
-    const item = mkItem(p, `<span style="color:${color}">${esc(p)}</span>`);
+    const item = mkItem(p, `<span style="color:${color}">${esc(p)}</span>`,
+                        preselected === null || preselected.has(p));
     item.addEventListener('dblclick', () => {
       activeProcesses = new Set([p]);
       menu.querySelectorAll('input').forEach(c => { c.checked = c.value === p; });
@@ -623,7 +1007,7 @@ function buildProcessDropdown() {
     applyFilters();
   });
 
-  activeProcesses = null;
+  activeProcesses = preselected;
   syncDropdownLabel();
 }
 
@@ -653,7 +1037,7 @@ async function handleUpload(files) {
         worker.onerror = e => reject(new Error(e.message));
         worker.postMessage({ file });
       });
-      for (const e of entries) allEntries.push(e);
+      for (const e of entries) { e.file = file.name; allEntries.push(e); }
     }
     allEntries.sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
     showLoading(false);
@@ -688,6 +1072,22 @@ function loadViewer(entries) {
   collapseRepeats = false;
   expandedGroups.clear();
 
+  setLaneMode(null);
+  clockSkew = detectClockSkew(entries);
+
+  // Latency stats for the dataset
+  latencyStats     = computeLatencyStats(entries);
+  latencySamples   = entries.filter(e => e.latency_ms != null);
+  latencyPanelOpen = false;
+  latencySortKey   = 'p95';
+  latencySortDir   = -1;
+  activeLatencyTag = null;
+  document.getElementById('latency-group').classList.toggle('hidden', !latencySamples.length);
+  const latBtn = document.getElementById('latency-toggle');
+  latBtn.classList.remove('active');
+  latBtn.setAttribute('aria-pressed', 'false');
+  renderLatencyPanel();
+
   // Reset UI
   document.getElementById('search-input').value = '';
   document.getElementById('exclude-input').value = '';
@@ -708,6 +1108,12 @@ function loadViewer(entries) {
   document.getElementById('entry-count').textContent =
     `${entries.length.toLocaleString()} entries`;
 
+  // Restore deep-link state (consumed once, on the first load after page open)
+  if (pendingHashState) {
+    applyHashState(pendingHashState);
+    pendingHashState = null;
+  }
+
   showViewer();
 }
 
@@ -715,7 +1121,7 @@ function loadViewer(entries) {
 function showViewer() {
   document.getElementById('upload-screen').classList.remove('active');
   document.getElementById('viewer-screen').classList.add('active');
-  requestAnimationFrame(() => { renderRows(); renderTimeline(); });
+  requestAnimationFrame(() => { renderRows(); renderTimeline(); drawRangeSelection(); });
 }
 
 function showUpload() {
@@ -751,12 +1157,14 @@ function isLogFile(name) {
   return name.endsWith('.txt') || name.endsWith('.log');
 }
 
-async function collectTxtFiles(entry) {
+const MAX_DIR_DEPTH = 5;  // recursion guard — a bag root is logs/ one level down
+
+async function collectTxtFiles(entry, depth = 0) {
   if (entry.isFile) {
     if (isLogFile(entry.name)) return [await fsEntryToFile(entry)];
     return [];
   }
-  if (entry.isDirectory) {
+  if (entry.isDirectory && depth < MAX_DIR_DEPTH && !entry.name.startsWith('.')) {
     const reader = entry.createReader();
     const files = [];
     // readEntries returns ≤100 results per call — loop until empty
@@ -764,9 +1172,7 @@ async function collectTxtFiles(entry) {
       const batch = await readDirEntries(reader);
       if (!batch.length) break;
       for (const child of batch) {
-        if (child.isFile && isLogFile(child.name)) {
-          files.push(await fsEntryToFile(child));
-        }
+        files.push(...await collectTxtFiles(child, depth + 1));
       }
     }
     return files;
@@ -857,6 +1263,7 @@ function initGridCanvas() {
 document.addEventListener('DOMContentLoaded', () => {
   initGridCanvas();
   document.getElementById('version-tag').textContent = VERSION;
+  pendingHashState = parseHash();
 
   const dropZone    = document.getElementById('drop-zone');
   const fileInput   = document.getElementById('file-input');
@@ -953,6 +1360,25 @@ document.addEventListener('DOMContentLoaded', () => {
     renderScrollMarkers();
     logContainer.scrollTop = 0;
     renderRows();
+    serializeHash();
+  });
+
+  // ── Timeline lanes toggle ──
+  document.getElementById('lanes-toggle').addEventListener('click', cycleLaneMode);
+
+  // ── Latency panel: toggle pill, sortable headers, row click to filter ──
+  document.getElementById('latency-toggle').addEventListener('click', toggleLatencyPanel);
+  document.getElementById('latency-panel').addEventListener('click', e => {
+    const th = e.target.closest('th[data-sort]');
+    if (th) {
+      const key = th.dataset.sort;
+      if (latencySortKey === key) latencySortDir = -latencySortDir;
+      else { latencySortKey = key; latencySortDir = key === 'tag' ? 1 : -1; }
+      renderLatencyPanel();
+      return;
+    }
+    const tr = e.target.closest('tr[data-tag]');
+    if (tr) selectLatencyTag(tr.dataset.tag);
   });
 
   // ── Log rows: click to inspect, or expand a collapsed group ──

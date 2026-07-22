@@ -662,6 +662,60 @@ mark {
   background: var(--accent-dim);
 }
 
+/* ── Timeline lanes pill ────────────────────────────────────── */
+#lanes-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* ── Latency panel ──────────────────────────────────────────── */
+#latency-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.latency-panel {
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.latency-panel::-webkit-scrollbar { width: 4px; }
+.latency-panel::-webkit-scrollbar-track { background: transparent; }
+.latency-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.latency-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.latency-table th, .latency-table td {
+  padding: 3px 10px;
+  text-align: right;
+  white-space: nowrap;
+}
+.latency-table .lat-col-tag { text-align: left; width: 100%; }
+.latency-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--text-dimmer);
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: .06em;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-dim);
+  user-select: none;
+}
+.latency-table th:hover { color: var(--text-dim); }
+.latency-table tbody tr { cursor: pointer; color: var(--text-dim); }
+.latency-table tbody tr:hover { background: var(--row-hover-bg); }
+.latency-table tbody td.lat-col-tag { color: var(--cyan); }
+.latency-table tbody tr.active { background: var(--accent-dim); }
+.latency-table tbody tr.active td { color: var(--accent); }
+
 /* ── Exclude search field ───────────────────────────────────── */
 .search-wrap--exclude { margin-left: 6px; }
 .search-wrap--exclude:focus-within {

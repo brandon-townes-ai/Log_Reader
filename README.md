@@ -8,7 +8,7 @@ Built by [brandon.townes@applied.co](https://anaheim.applied.co/anaheim/appliedi
 
 ## Features
 
-- **Drag & drop** — drop a single file or an entire folder of `.txt` / `.log` files
+- **Drag & drop** — drop a single file, a folder of `.txt` / `.log` files, or a whole bag directory (subfolders like `logs/` are searched recursively; binary siblings such as `traces/`, `mcap/`, `can_data/` are ignored)
 - **Level filtering** — one-click filter for INFO, DEBUG, WARN, ERROR, FATAL, ALWAYS
 - **Process filtering** — multi-select dropdown to isolate specific nodes
 - **Regex search + exclude** — filter and anti-filter with full regex support
@@ -58,6 +58,17 @@ YYYY-MM-DD HH:MM:SS.ffffff[process][LEVEL][module][source] message
 ```
 
 Multi-line entries (stack traces, health monitor tables, etc.) are automatically detected and attached to their parent entry. ANSI escape codes are stripped automatically.
+
+### Latency extraction
+
+Messages containing durations (`took 12.3 ms`, `latency: 45ms`, `duration=0.012s`, `[LATENCY] tag=... 850us`, …) are tagged with a normalized `latency_tag` and a unit-normalized `latency_ms` at parse time. The pattern table lives in `frontend/latency.js` (browser) and `src/parser.py` (CLI) — **the two `LATENCY_PATTERNS` tables must stay textually identical**; `tests/test_latency.py` is the oracle when adding a new pattern. View per-tag stats with the LATENCY panel in the UI or `python -m src.cli <logs> --latency`.
+
+### Tests
+
+```
+pip install -r requirements-dev.txt
+python -m pytest tests/
+```
 
 ---
 

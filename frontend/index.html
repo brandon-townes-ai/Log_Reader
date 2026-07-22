@@ -38,7 +38,7 @@
             </svg>
           </div>
           <p class="dz-label">Drop log files here</p>
-          <p class="dz-sub">or click to browse &mdash; accepts .txt / .log files or a folder</p>
+          <p class="dz-sub">or click to browse &mdash; accepts .txt / .log files, a folder, or a whole bag (subfolders searched)</p>
         </div>
         <input type="file" id="file-input" accept=".txt,.log" multiple tabindex="-1">
       </div>
@@ -107,6 +107,16 @@
         <button class="pill" id="collapse-toggle" aria-pressed="false" title="Fold consecutive identical lines">COLLAPSE</button>
       </div>
 
+      <div class="filter-group hidden" id="latency-group">
+        <span class="filter-label" aria-hidden="true">LATENCY</span>
+        <button class="pill" id="latency-toggle" aria-pressed="false" title="Per-tag latency statistics">STATS</button>
+      </div>
+
+      <div class="filter-group">
+        <span class="filter-label" aria-hidden="true">TIMELINE</span>
+        <button class="pill" id="lanes-toggle" title="Cycle per-process / per-file timeline lanes">LANES: OFF</button>
+      </div>
+
       <div class="filter-group filter-group--search">
         <span class="filter-label" aria-hidden="true">SEARCH</span>
         <label class="search-wrap">
@@ -135,6 +145,8 @@
       </div>
     </div>
 
+    <div id="latency-panel" class="latency-panel hidden" aria-label="Latency statistics"></div>
+
     <div class="log-area">
       <div id="log-container" class="log-container" role="log" aria-label="Log entries">
         <div id="spacer-top" aria-hidden="true"></div>
@@ -156,6 +168,7 @@
 
   </div>
 
+  <script src="latency.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
