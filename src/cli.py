@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from .parser import parse_file, merge_and_sort, latency_stats, LogEntry
+from .parser import parse_file, merge_and_sort, latency_stats, fault_stats, LogEntry
 
 console = Console()
 
@@ -68,6 +68,8 @@ def main():
     parser.add_argument("--process", help="Only show lines from this process")
     parser.add_argument("--latency", action="store_true",
                         help="Show per-tag latency statistics instead of the log stream")
+    parser.add_argument("--faults", action="store_true",
+                        help="Show a deduped fault summary instead of the log stream")
     args = parser.parse_args()
 
     # Expand any directory args to all .txt files inside them
@@ -102,6 +104,32 @@ def main():
     if args.search:
         needle = args.search.lower()
         entries = [e for e in entries if needle in e.message.lower() or needle in e.raw.lower()]
+
+    if args.faults:
+        stats = fault_stats(entries)
+        if not stats:
+            console.print("[dim]No faults found.[/dim]")
+            return
+        sev_style = {"FATAL": "bold bright_red", "ERROR": "red", "WARN": "yellow", "INFO": "white"}
+        table = Table(title="Faults by code")
+        table.add_column("CODE", style="bright_cyan", overflow="fold")
+        table.add_column("SEVERITY")
+        table.add_column("LINES", justify="right")
+        table.add_column("REPORTED", justify="right")
+        table.add_column("FIRST", style="dim")
+        table.add_column("LAST", style="dim")
+        table.add_column("DETAIL", overflow="fold")
+        for s in stats:
+            table.add_row(
+                s["code"],
+                f'[{sev_style.get(s["severity"], "white")}]{s["severity"]}[/]',
+                str(s["lines"]),
+                str(s["reported_max"]) if s["reported_max"] else "—",
+                s["first"][:19], s["last"][:19],
+                s["detail"] or "",
+            )
+        console.print(table)
+        return
 
     if args.latency:
         stats = latency_stats(entries)

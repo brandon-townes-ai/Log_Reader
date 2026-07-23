@@ -19,3 +19,9 @@ ValueError: timeout
 2026-07-01 10:00:01.600000[fusion_detector][INFO][global][fusion_detector_component.cc:88] FusionDetector::callback min: 0.5 ms, avg: 12.5 ms, std: 1.2 ms, max: 40.1 ms, num ticks: 100, total elapsed time: 1.4e+03 ms
 2026-07-01 10:00:01.700000[cloud_supervisor][INFO][global][cloud_supervisor_component.cc:55] Received bedrock latency response: 45 ms.
 2026-07-01 10:00:01.800000[foxglove_bridge][INFO][global][topic_throughput_logger.cc:9] FoxgloveBridge topic throughput: topic=/cloud_supervisor/latency_report window_sec=30 message_count=12 msg_per_sec=0.4
+2026-07-01 10:00:01.900000[:diagnostic_system][INFO][process_stdout][:] ERROR_DISENGAGE | REDSTONE_FAULT_P1_STANDARD               |  11871 times |    2 min ago | Fault: STACK_DRIVER_FAULT_CMD_TIMEOUT_PARK_BRAKE code: 0x926
+2026-07-01 10:00:02.000000[:fault_monitor][INFO][process_stdout][:] redstone_driver                         REDSTONE_FAULT_P1_STANDARD           11867        2026-07-01 03:06:51      Fault: STACK_DRIVER_FAULT_CMD_TIMEOUT_PARK_BRAKE code: 0x926
+2026-07-01 10:00:02.100000[:fault_monitor][INFO][process_stdout][:] REDSTONE_FAULT_P2_WARNING             1914        2026-07-01 03:06:51      Fault: STACK_DRIVER_FAULT_RC_SYSTEM code: 0x918
+2026-07-01 10:00:02.200000[:controls_arbiter][INFO][global][system_controls_state_machine.cc:38] [SYSTEM] -> SYSTEM_COMMAND_DISENGAGE
+2026-07-01 10:00:02.300000[:fault_monitor][INFO][process_stdout][:] ===== ACTIVE FAULTS =====
+2026-07-01 10:00:02.400000[:fault_monitor][INFO][process_stdout][:] Composition Instance ID                 Fault ID                             Count        Last Seen

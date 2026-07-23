@@ -23,7 +23,7 @@ function toggleTheme() {
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
 // ── Version ──────────────────────────────────────────────────
-const VERSION = 'v1.0.5';
+const VERSION = 'v1.0.6';
 
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
@@ -76,6 +76,11 @@ let signalsSortKey   = 'count';
 let signalsSortDir   = -1;
 let signalsFilter    = '';
 let signalsTruncated = false; // a file hit the per-file sample cap
+let faultStats       = [];    // [{code, severity, lines, reportedMax, firstT, lastT, detail}]
+let faultSamples     = [];    // entries with fault_code, in timestamp order
+let activeFaultCode  = null;  // string | null — FAULTS panel row filter
+let faultsSortKey    = 'severity';
+let faultsSortDir    = -1;
 
 // ── Utilities ────────────────────────────────────────────────
 function hashColor(str) {
@@ -222,6 +227,7 @@ function buildRow(row, idx) {
   const lvlColor  = LEVEL_COLORS[entry.level] || '#94a3b8';
   const procColor = hashColor(entry.process);
   const isFatal   = entry.level === 'FATAL';
+  if (entry.fault_severity) div.classList.add('fault-' + entry.fault_severity.toLowerCase());
 
   let html = `<span class="tok-ts">${esc(entry.timestamp)}</span>`;
   html += ` <span class="tok-proc" style="color:${procColor}">[${esc(entry.process)}]</span>`;
@@ -287,6 +293,7 @@ function serializeHash() {
   }
   if (selectedEntry) p.set('sel', `${encodeURIComponent(selectedEntry.file ?? '')}~${selectedEntry.line_number}`);
   if (activeLatencyTag !== null) p.set('lat', activeLatencyTag);
+  if (activeFaultCode !== null) p.set('flt', activeFaultCode);
   if (activeSignals.length) p.set('sig', activeSignals.map(encodeURIComponent).join(','));
   const str = p.toString();
   history.replaceState(null, '', str === 'v=1' ? location.pathname + location.search : '#' + str);
@@ -308,6 +315,7 @@ function parseHash() {
     if (i > -1) st.sel = { file: decodeURIComponent(raw.slice(0, i)), line: +raw.slice(i + 1) };
   }
   if (p.has('lat')) st.lat = p.get('lat');
+  if (p.has('flt')) st.flt = p.get('flt');
   if (p.has('sig')) st.sig = p.get('sig').split(',').filter(Boolean).map(decodeURIComponent);
   return st;
 }
@@ -347,6 +355,10 @@ function applyHashState(st) {
     activeLatencyTag = st.lat;
     openDock('latency');
   }
+  if (st.flt && faultStats.some(f => f.code === st.flt)) {
+    activeFaultCode = st.flt;
+    openDock('faults');
+  }
   if (st.sig) activeSignals = st.sig.filter(n => signalData.has(n)).slice(0, MAX_ACTIVE_SIGNALS);
 
   applyFilters();
@@ -369,6 +381,7 @@ function applyFilters() {
     if (activeLevels    !== null && !activeLevels.has(canonLevel(e.level))) return false;
     if (activeProcesses !== null && !activeProcesses.has(e.process))        return false;
     if (activeLatencyTag !== null && e.latency_tag !== activeLatencyTag)    return false;
+    if (activeFaultCode !== null && e.fault_code !== activeFaultCode)       return false;
     if (rangeStart !== null && (e._t < rangeStart || e._t > rangeEnd))      return false;
     if (searchRegex  && !searchRegex.test(e.raw))  return false;
     if (excludeRegex &&  excludeRegex.test(e.raw)) return false;
@@ -546,6 +559,50 @@ function drawSignalOverlay(ctx, w, h) {
   });
 }
 
+// ── Faults panel ─────────────────────────────────────────────
+function renderFaultsPanel() {
+  if (dockTab !== 'faults') return;
+
+  const dir = faultsSortDir;
+  const rows = [...faultStats].sort((a, b) => {
+    let va, vb;
+    if (faultsSortKey === 'severity') {
+      va = FAULT_SEVERITY_RANK[a.severity]; vb = FAULT_SEVERITY_RANK[b.severity];
+    } else {
+      va = a[faultsSortKey]; vb = b[faultsSortKey];
+    }
+    const cmp = (va < vb ? -1 : va > vb ? 1 : 0) * dir;
+    return cmp !== 0 ? cmp : b.lines - a.lines;
+  });
+
+  const cols = [['severity','SEV'],['code','CODE'],['lines','LINES'],['reportedMax','REPORTED'],['lastT','LAST SEEN'],['detail','DETAIL']];
+  let html = '<table class="latency-table"><thead><tr>';
+  for (const [key, label] of cols) {
+    const arrow = key === faultsSortKey ? (dir < 0 ? ' ▾' : ' ▴') : '';
+    html += `<th data-sort="${key}"${key === 'detail' ? ' class="lat-col-tag"' : ''}>${label}${arrow}</th>`;
+  }
+  html += '</tr></thead><tbody>';
+  for (const f of rows) {
+    const color = LEVEL_COLORS[f.severity] || LEVEL_COLORS.ERROR;
+    html += `<tr data-flt="${esc(f.code)}"${f.code === activeFaultCode ? ' class="active"' : ''}>` +
+      `<td><span class="sig-dot" style="background:${color};border-color:${color}"></span>${f.severity}</td>` +
+      `<td class="flt-code">${esc(f.code)}</td>` +
+      `<td>${f.lines.toLocaleString()}</td>` +
+      `<td>${f.reportedMax ? f.reportedMax.toLocaleString() + '×' : '—'}</td>` +
+      `<td>${f.lastT != null ? fmtClock(f.lastT) : '—'}</td>` +
+      `<td class="lat-col-tag flt-detail">${esc(f.detail || '')}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('faults-table-wrap').innerHTML = html;
+}
+
+function selectFaultCode(code) {
+  activeFaultCode = activeFaultCode === code ? null : code;
+  renderFaultsPanel();
+  applyFilters();
+  renderTimeline();
+}
+
 function selectLatencyTag(tag) {
   activeLatencyTag = activeLatencyTag === tag ? null : tag;
   renderLatencyPanel();
@@ -585,6 +642,18 @@ function renderStats() {
       `<span class="stat-val">${levelCounts[lv].toLocaleString()}</span>`;
     frag.appendChild(chip);
   });
+
+  // Fault summary (open via the FAULTS pill)
+  if (faultStats.length) {
+    frag.appendChild(sep());
+    const worst = LEVEL_COLORS[faultStats[0].severity] || LEVEL_COLORS.ERROR;  // sorted worst-first
+    const chip = document.createElement('span');
+    chip.className = 'stat-chip';
+    chip.innerHTML =
+      `<span class="stat-label" style="color:${worst}">⚠ FAULTS</span>` +
+      `<span class="stat-val" style="color:${worst}">${faultStats.length} code${faultStats.length > 1 ? 's' : ''} · ${faultSamples.length.toLocaleString()} lines</span>`;
+    frag.appendChild(chip);
+  }
 
   // Latency summary (open via the LATENCY pill)
   if (latencySamples.length) {
@@ -712,6 +781,17 @@ function renderTimeline() {
     seg(bk.info, dim);
     seg(bk.warn, LEVEL_COLORS.WARN);
     seg(bk.err,  LEVEL_COLORS.ERROR);
+  }
+
+  // Fault strip: severity ticks along the top edge — fault dumps are logged
+  // at INFO, so the level histogram alone would hide them
+  if (faultSamples.length) {
+    for (const e of faultSamples) {
+      const dimmed = activeFaultCode !== null && e.fault_code !== activeFaultCode;
+      ctx.fillStyle = (LEVEL_COLORS[e.fault_severity] || LEVEL_COLORS.ERROR) + (dimmed ? '33' : '');
+      const x = Math.min(w - 1, ((e._t - tStart) / span) * w);
+      ctx.fillRect(x, 0, 1, 5);
+    }
   }
 
   // Latency scatter overlay (log-scale Y) while the latency panel is open
@@ -929,10 +1009,12 @@ function renderScrollMarkers() {
   const frag = document.createDocumentFragment();
   const seen = new Set();
   for (let i = 0; i < total; i++) {
-    const lv = canonLevel(displayRows[i].entry.level);
+    const entry = displayRows[i].entry;
+    const lv = canonLevel(entry.level);
+    const fsev = entry.fault_severity;
     let color = null;
-    if (lv === 'ERROR' || lv === 'FATAL') color = LEVEL_COLORS.ERROR;
-    else if (lv === 'WARN')               color = LEVEL_COLORS.WARN;
+    if (lv === 'ERROR' || lv === 'FATAL' || fsev === 'ERROR' || fsev === 'FATAL') color = LEVEL_COLORS.ERROR;
+    else if (lv === 'WARN' || fsev === 'WARN')                                    color = LEVEL_COLORS.WARN;
     if (!color) continue;
     const pct = Math.round((i / total) * 1000) / 10;  // 0.1% buckets cap DOM size
     const key = color + pct;
@@ -1008,6 +1090,9 @@ function openInspector(entry) {
   if (entry.latency_ms != null) {
     metaFields.push(['Latency', `${fmtMs(entry.latency_ms)} — ${entry.latency_tag} (${entry.latency_pattern})`]);
   }
+  if (entry.fault_code) {
+    metaFields.push(['Fault', `${entry.fault_code} (${entry.fault_severity}${entry.fault_count != null ? `, reported ${entry.fault_count}×` : ''})`]);
+  }
 
   let html = metaFields.map(([k, v]) =>
     `<div class="insp-field"><div class="insp-key">${esc(k)}</div>` +
@@ -1065,15 +1150,16 @@ function renderDock() {
   document.getElementById('dock').classList.toggle('hidden', dockTab === null);
   document.querySelectorAll('.dock-tab').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.tab === dockTab));
+  document.getElementById('dock-faults').classList.toggle('active', dockTab === 'faults');
   document.getElementById('dock-inspect').classList.toggle('active', dockTab === 'inspect');
   document.getElementById('dock-latency').classList.toggle('active', dockTab === 'latency');
   document.getElementById('dock-signals').classList.toggle('active', dockTab === 'signals');
-  const latBtn = document.getElementById('latency-toggle');
-  latBtn.classList.toggle('active', dockTab === 'latency');
-  latBtn.setAttribute('aria-pressed', String(dockTab === 'latency'));
-  const sigBtn = document.getElementById('signals-toggle');
-  sigBtn.classList.toggle('active', dockTab === 'signals');
-  sigBtn.setAttribute('aria-pressed', String(dockTab === 'signals'));
+  for (const [id, tab] of [['faults-toggle', 'faults'], ['latency-toggle', 'latency'], ['signals-toggle', 'signals']]) {
+    const btn = document.getElementById(id);
+    btn.classList.toggle('active', dockTab === tab);
+    btn.setAttribute('aria-pressed', String(dockTab === tab));
+  }
+  if (dockTab === 'faults')  renderFaultsPanel();
   if (dockTab === 'latency') renderLatencyPanel();
   if (dockTab === 'signals') renderSignalsPanel();
 }
@@ -1091,11 +1177,11 @@ function closeDock() {
   const wasLatency = dockTab === 'latency';
   dockTab = null;
   renderDock();
-  if (activeLatencyTag !== null) {
-    activeLatencyTag = null;  // dock gone = latency filter gone; no hidden state
-    applyFilters();
-  }
-  if (wasLatency) renderTimeline();
+  let refilter = false;  // dock gone = its filters gone; no hidden state
+  if (activeLatencyTag !== null) { activeLatencyTag = null; refilter = true; }
+  if (activeFaultCode !== null)  { activeFaultCode = null;  refilter = true; }
+  if (refilter) applyFilters();
+  if (wasLatency || refilter) renderTimeline();
 }
 
 function toggleDockTab(tab) {
@@ -1204,6 +1290,11 @@ async function handleUpload(files) {
     for (const file of uploadedFiles) {
       const data = await new Promise((resolve, reject) => {
         worker.onmessage = ({ data }) => {
+          // big logs arrive as N 'chunk' messages followed by one 'done'
+          if (data.type === 'chunk') {
+            for (const e of data.entries) { e.file = file.name; allEntries.push(e); }
+            return;
+          }
           if (data.type === 'done')  resolve(data);
           if (data.type === 'error') reject(new Error(data.message));
         };
@@ -1297,6 +1388,15 @@ function loadViewer(entries, signals = [], truncated = false) {
   document.getElementById('latency-toggle').classList.toggle('hidden', !latencySamples.length);
   document.getElementById('dock-tab-latency').classList.toggle('hidden', !latencySamples.length);
 
+  // Fault ledger for the dataset
+  faultStats      = computeFaultStats(entries);
+  faultSamples    = entries.filter(e => e.fault_code);
+  activeFaultCode = null;
+  faultsSortKey   = 'severity';
+  faultsSortDir   = -1;
+  document.getElementById('faults-toggle').classList.toggle('hidden', !faultStats.length);
+  document.getElementById('dock-tab-faults').classList.toggle('hidden', !faultStats.length);
+
   // Reset UI
   document.getElementById('search-input').value = '';
   document.getElementById('exclude-input').value = '';
@@ -1318,6 +1418,9 @@ function loadViewer(entries, signals = [], truncated = false) {
     uploadedFiles.map(f => f.name).join('  ·  ');
   document.getElementById('entry-count').textContent =
     `${entries.length.toLocaleString()} entries`;
+
+  // Faults first: auto-open the ledger when the bag contains faults
+  if (faultStats.length) openDock('faults');
 
   // Restore deep-link state (consumed once, on the first load after page open)
   if (pendingHashState) {
@@ -1605,6 +1708,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const tr = e.target.closest('tr[data-sig]');
     if (tr) toggleSignalOverlay(tr.dataset.sig);
+  });
+
+  // ── Faults panel: toggle pill, sortable headers, row click to filter ──
+  document.getElementById('faults-toggle').addEventListener('click', () => toggleDockTab('faults'));
+  document.getElementById('dock-faults').addEventListener('click', e => {
+    const th = e.target.closest('th[data-sort]');
+    if (th) {
+      const key = th.dataset.sort;
+      if (faultsSortKey === key) faultsSortDir = -faultsSortDir;
+      else { faultsSortKey = key; faultsSortDir = (key === 'code' || key === 'detail') ? 1 : -1; }
+      renderFaultsPanel();
+      return;
+    }
+    const tr = e.target.closest('tr[data-flt]');
+    if (tr) selectFaultCode(tr.dataset.flt);
   });
 
   // ── Latency panel: toggle pill, sortable headers, row click to filter ──

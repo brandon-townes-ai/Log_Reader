@@ -29,6 +29,11 @@ class LogEntry:
     latency_ms: float | None = None
     latency_tag: str | None = None
     latency_pattern: str | None = None
+    fault_code: str | None = None
+    fault_severity: str | None = None
+    fault_count: int | None = None
+    fault_detail: str | None = None
+    fault_pattern: str | None = None
 
 
 # ── Latency extraction ────────────────────────────────────────
@@ -92,6 +97,86 @@ def extract_latency(entry: LogEntry) -> LogEntry:
         entry.latency_pattern = pat["name"]
         return entry
     return entry
+
+
+# ── Fault extraction ──────────────────────────────────────────
+# Mirror of frontend/faults.js — the pattern strings must stay
+# textually identical in both files.
+
+FAULT_SEVERITY_RANK = {"FATAL": 3, "ERROR": 2, "WARN": 1, "INFO": 0}
+
+# Ordered by specificity; first match wins.
+FAULT_PATTERNS = [
+    # "ERROR_DISENGAGE | REDSTONE_FAULT_P1_STANDARD | 11871 times | 2 min ago | Fault: … code: 0x926"
+    {"name": "diag_pipe", "severity": 1, "code": 2, "count": 3, "detail": 5,
+     "re": re.compile(r'^([A-Z][A-Z_]*)\s*\|\s*([A-Z][A-Z0-9_]+)\s*\|\s*(\d+)\s*times\s*\|\s*(.+?)\s*\|\s*(.+)$')},
+    # "redstone_driver   REDSTONE_FAULT_P1_STANDARD   11867   2026-07-18 12:06:51   Fault: …"
+    # (origin column is optional — P2 rows start with the code)
+    {"name": "monitor_row", "code": 2, "count": 3, "detail": 5,
+     "re": re.compile(r'^(?:([a-z]\w[\w.-]*)\s{2,})?([A-Z][A-Z0-9_]{3,})\s{2,}(\d+)\s{2,}(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s{2,}(\S.*)$')},
+    # "[SYSTEM] -> SYSTEM_COMMAND_DISENGAGE" — the moment autonomy dropped
+    {"name": "disengage_event", "code": 1,
+     "re": re.compile(r'->\s*(SYSTEM_COMMAND_DISENGAGE)\b')},
+]
+
+
+def map_fault_severity(word: str | None) -> str:
+    s = (word or "").upper()
+    if s.startswith("FATAL"):
+        return "FATAL"
+    if s.startswith("ERROR"):
+        return "ERROR"
+    if s.startswith("WARN"):
+        return "WARN"
+    return "INFO"
+
+
+def extract_fault(entry: LogEntry) -> LogEntry:
+    for pat in FAULT_PATTERNS:
+        m = pat["re"].search(entry.message)
+        if not m:
+            continue
+        entry.fault_code = m.group(pat["code"])
+        if pat["name"] == "diag_pipe":
+            entry.fault_severity = map_fault_severity(m.group(pat["severity"]))
+        elif pat["name"] == "monitor_row":
+            entry.fault_severity = "WARN"  # active-fault table carries no severity; stats take the max seen per code
+        else:
+            entry.fault_severity = "ERROR"
+        if "count" in pat:
+            entry.fault_count = int(m.group(pat["count"]))
+        entry.fault_detail = m.group(pat["detail"]).strip() if "detail" in pat else entry.message
+        entry.fault_pattern = pat["name"]
+        return entry
+    return entry
+
+
+def fault_stats(entries: list[LogEntry]) -> list[dict]:
+    """Group per code; severity is the worst seen; timestamps are the
+    entries' timestamp strings (lexically sortable)."""
+    groups: dict[str, dict] = {}
+    for e in entries:
+        if not e.fault_code:
+            continue
+        g = groups.get(e.fault_code)
+        if g is None:
+            g = {"code": e.fault_code, "severity": e.fault_severity, "lines": 0,
+                 "reported_max": 0, "first": e.timestamp, "last": e.timestamp,
+                 "detail": e.fault_detail}
+            groups[e.fault_code] = g
+        g["lines"] += 1
+        if FAULT_SEVERITY_RANK[e.fault_severity] > FAULT_SEVERITY_RANK[g["severity"]]:
+            g["severity"] = e.fault_severity
+        if e.fault_count is not None and e.fault_count > g["reported_max"]:
+            g["reported_max"] = e.fault_count
+        if e.timestamp < g["first"]:
+            g["first"] = e.timestamp
+        if e.timestamp > g["last"]:
+            g["last"] = e.timestamp
+        g["detail"] = e.fault_detail
+    stats = list(groups.values())
+    stats.sort(key=lambda s: (-FAULT_SEVERITY_RANK[s["severity"]], -s["lines"]))
+    return stats
 
 
 def _percentile(sorted_vals: list[float], p: float) -> float:
@@ -161,6 +246,7 @@ def parse_text(text: str) -> list[LogEntry]:
 
     for entry in entries:
         extract_latency(entry)
+        extract_fault(entry)
     return entries
 
 

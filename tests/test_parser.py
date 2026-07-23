@@ -17,7 +17,7 @@ def by_line(entries, n):
 
 
 def test_entry_count(entries):
-    assert len(entries) == 18
+    assert len(entries) == 24
 
 
 def test_basic_fields(entries):
