@@ -287,7 +287,6 @@ function serializeHash() {
   }
   if (selectedEntry) p.set('sel', `${encodeURIComponent(selectedEntry.file ?? '')}~${selectedEntry.line_number}`);
   if (activeLatencyTag !== null) p.set('lat', activeLatencyTag);
-  if (laneMode !== null) p.set('lanes', laneMode);
   if (activeSignals.length) p.set('sig', activeSignals.map(encodeURIComponent).join(','));
   const str = p.toString();
   history.replaceState(null, '', str === 'v=1' ? location.pathname + location.search : '#' + str);
@@ -309,7 +308,6 @@ function parseHash() {
     if (i > -1) st.sel = { file: decodeURIComponent(raw.slice(0, i)), line: +raw.slice(i + 1) };
   }
   if (p.has('lat')) st.lat = p.get('lat');
-  if (p.has('lanes')) st.lanes = p.get('lanes');
   if (p.has('sig')) st.sig = p.get('sig').split(',').filter(Boolean).map(decodeURIComponent);
   return st;
 }
@@ -349,7 +347,6 @@ function applyHashState(st) {
     activeLatencyTag = st.lat;
     openDock('latency');
   }
-  if (st.lanes === 'proc' || st.lanes === 'file') setLaneMode(st.lanes);
   if (st.sig) activeSignals = st.sig.filter(n => signalData.has(n)).slice(0, MAX_ACTIVE_SIGNALS);
 
   applyFilters();
@@ -667,7 +664,7 @@ function renderTimeline() {
   // Lanes mode grows the bar to fit; reset to the CSS default when off
   const lanes = laneMode !== null && allEntries.length ? computeLanes() : null;
   barEl.style.height = lanes
-    ? Math.max(56, Math.min(160, lanes.length * 16 + 8)) + 'px'
+    ? Math.max(56, Math.min(maxLaneBarHeight(), lanes.length * LANE_H + 8)) + 'px'
     : '';
 
   const w = barEl.clientWidth, h = barEl.clientHeight;
@@ -747,16 +744,40 @@ function renderTimeline() {
 }
 
 const MAX_PROC_LANES = 8;  // proc mode: top N by count, rest folded into 'other'
+const LANE_H = 16;         // px per lane — lanes are folded rather than squeezed below this
+
+function maxLaneBarHeight() {
+  return Math.min(300, Math.round(window.innerHeight * 0.38));
+}
 
 function computeLanes() {
+  // Fold the least-active sources into 'other' so every lane keeps ≥LANE_H
+  const maxLanes = Math.max(3, Math.floor((maxLaneBarHeight() - 8) / LANE_H));
+
   if (laneMode === 'file') {
-    const keys = [...new Set(allEntries.map(e => e.file ?? '(unknown)'))].sort();
-    return keys.map(k => ({ key: k, match: e => (e.file ?? '(unknown)') === k }));
+    const counts = {};
+    for (const e of allEntries) {
+      const f = e.file ?? '(unknown)';
+      counts[f] = (counts[f] || 0) + 1;
+    }
+    const names = Object.keys(counts).sort();
+    const mk = k => ({ key: k, match: e => (e.file ?? '(unknown)') === k });
+    if (names.length <= maxLanes) return names.map(mk);
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])
+      .slice(0, maxLanes - 1).map(([f]) => f);
+    const topSet = new Set(top);
+    const lanes = top.sort().map(mk);
+    lanes.push({
+      key: `other (${names.length - top.length} files)`,
+      match: e => !topSet.has(e.file ?? '(unknown)'),
+    });
+    return lanes;
   }
+
   const counts = {};
   for (const e of allEntries) counts[e.process] = (counts[e.process] || 0) + 1;
   const top = Object.entries(counts).sort((a, b) => b[1] - a[1])
-    .slice(0, MAX_PROC_LANES).map(([p]) => p);
+    .slice(0, Math.min(MAX_PROC_LANES, maxLanes - 1)).map(([p]) => p);
   const topSet = new Set(top);
   const lanes = top.map(p => ({ key: p, match: e => e.process === p }));
   if (Object.keys(counts).length > top.length) {
@@ -765,10 +786,20 @@ function computeLanes() {
   return lanes;
 }
 
+// Lane labels: strip the boilerplate every bag file shares
+function laneLabel(key) {
+  const s = key.replace(/\.(txt|log)$/i, '').replace(/_stdout$/i, '');
+  return s.length > 38 ? s.slice(0, 37) + '…' : s;
+}
+
 function renderTimelineLanes(ctx, w, h, lanes) {
   const span  = tEnd - tStart;
   const nb    = Math.max(1, Math.floor(w));
   const laneH = h / lanes.length;
+  const css      = getComputedStyle(document.documentElement);
+  const surface  = css.getPropertyValue('--surface').trim() || '#161b22';
+  const labelCol = css.getPropertyValue('--text-dim').trim() || '#8b949e';
+  const divider  = css.getPropertyValue('--border-dim').trim() || '#21262d';
   ctx.font = '9px "JetBrains Mono", monospace';
   ctx.textBaseline = 'top';
 
@@ -808,28 +839,40 @@ function renderTimelineLanes(ctx, w, h, lanes) {
       if (worst[i] === 2)      ctx.fillStyle = LEVEL_COLORS.ERROR;
       else if (worst[i] === 1) ctx.fillStyle = LEVEL_COLORS.WARN;
       else {
-        const alpha = Math.round(40 + (buckets[i] / max) * 215).toString(16).padStart(2, '0');
+        const alpha = Math.round(70 + (buckets[i] / max) * 185).toString(16).padStart(2, '0');
         ctx.fillStyle = color + alpha;
       }
       ctx.fillRect(i, y0 + 2, 1, laneH - 4);
     }
 
-    ctx.fillStyle = color;
-    ctx.fillText(lane.key, 4, y0 + 3);
+    // Lane divider
+    ctx.fillStyle = divider;
+    ctx.fillRect(0, Math.round(y0 + laneH) - 1, w, 1);
+
+    // Label on a backing chip: color swatch + theme text, readable over strips
+    if (laneH >= 12) {
+      const label = laneLabel(lane.key);
+      const tw = (ctx.measureText(label) || { width: label.length * 6 }).width;
+      ctx.fillStyle = surface + 'd9';
+      ctx.fillRect(2, y0 + 1, tw + 15, Math.min(13, laneH - 2));
+      ctx.fillStyle = color;
+      ctx.fillRect(4, y0 + 4, 6, 6);
+      ctx.fillStyle = labelCol;
+      ctx.fillText(label, 13, y0 + 3);
+    }
   });
 }
 
 function setLaneMode(mode) {
   laneMode = mode;
   const btn = document.getElementById('lanes-toggle');
-  btn.textContent = 'LANES: ' + (mode === null ? 'OFF' : mode.toUpperCase());
+  btn.textContent = 'SPLIT: ' + (mode === null ? 'OFF' : mode === 'proc' ? 'PROCESS' : 'FILE');
   btn.classList.toggle('active', mode !== null);
 }
 
 function cycleLaneMode() {
   setLaneMode(laneMode === null ? 'proc' : laneMode === 'proc' ? 'file' : null);
   renderTimeline();
-  serializeHash();
 }
 
 // ── Clock-skew detection ─────────────────────────────────────
