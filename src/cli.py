@@ -1,6 +1,6 @@
 """
 Usage:
-    python -m src.cli <file|dir> [file2|dir2 ...] [--level LEVEL] [--search TEXT] [--process NAME]
+    python -m src.cli <file|dir> [file2|dir2 ...] [--level LEVEL] [--search TEXT] [--process NAME] [--latency]
 """
 import argparse
 import hashlib
@@ -8,9 +8,10 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
+from rich.table import Table
 from rich.text import Text
 
-from .parser import parse_file, merge_and_sort, LogEntry
+from .parser import parse_file, merge_and_sort, latency_stats, LogEntry
 
 console = Console()
 
@@ -37,6 +38,13 @@ def _process_color(name: str) -> str:
     return _PROCESS_COLORS[idx]
 
 
+def collect_log_files(path: Path) -> list[Path]:
+    """Recursively find .txt/.log files under a directory, so a bag root
+    (with its logs/ subfolder) works as well as the logs/ folder itself.
+    Binary siblings (traces/*.pbbin, mcap/, can_data/) don't match."""
+    return sorted([*path.rglob("*.txt"), *path.rglob("*.log")])
+
+
 def _render_entry(entry: LogEntry) -> Text:
     t = Text()
     t.append(entry.timestamp, style="dim")
@@ -58,6 +66,8 @@ def main():
     parser.add_argument("--level", help="Filter by log level (e.g. ERROR, WARN)")
     parser.add_argument("--search", help="Only show lines containing this text")
     parser.add_argument("--process", help="Only show lines from this process")
+    parser.add_argument("--latency", action="store_true",
+                        help="Show per-tag latency statistics instead of the log stream")
     args = parser.parse_args()
 
     # Expand any directory args to all .txt files inside them
@@ -65,9 +75,9 @@ def main():
     for arg in args.files:
         p = Path(arg)
         if p.is_dir():
-            txt_files = sorted(p.glob("*.txt"))
+            txt_files = collect_log_files(p)
             if not txt_files:
-                console.print(f"[yellow]No .txt files found in:[/yellow] {arg}", err=True)
+                console.print(f"[yellow]No .txt/.log files found under:[/yellow] {arg}", err=True)
             resolved.extend(str(f) for f in txt_files)
         else:
             resolved.append(arg)
@@ -92,6 +102,24 @@ def main():
     if args.search:
         needle = args.search.lower()
         entries = [e for e in entries if needle in e.message.lower() or needle in e.raw.lower()]
+
+    if args.latency:
+        stats = latency_stats(entries)
+        if not stats:
+            console.print("[dim]No latency samples found.[/dim]")
+            return
+        table = Table(title="Latency by tag (ms)")
+        table.add_column("TAG", style="bright_cyan", overflow="fold")
+        table.add_column("COUNT", justify="right")
+        table.add_column("MEAN", justify="right")
+        table.add_column("P50", justify="right")
+        table.add_column("P95", justify="right", style="yellow")
+        table.add_column("MAX", justify="right", style="red")
+        for s in stats:
+            table.add_row(s["tag"], str(s["count"]), f'{s["mean"]:.2f}',
+                          f'{s["p50"]:.2f}', f'{s["p95"]:.2f}', f'{s["max"]:.2f}')
+        console.print(table)
+        return
 
     if not entries:
         console.print("[dim]No matching log entries.[/dim]")

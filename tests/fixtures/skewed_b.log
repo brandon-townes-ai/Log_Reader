@@ -1,0 +1,5 @@
+2026-07-01 12:00:05.100000[skewed_node][INFO][init][boot.cc:1] Node started
+2026-07-01 12:00:05.400000[skewed_node][INFO][core][tick.cc:4] cycle took 9.5 ms
+2026-07-01 12:00:05.700000[skewed_node][WARN][core][tick.cc:9] deadline miss
+2026-07-01 12:00:06.000000[skewed_node][INFO][core][tick.cc:4] cycle took 11.0 ms
+2026-07-01 12:00:06.300000[skewed_node][INFO][init][boot.cc:20] shutdown

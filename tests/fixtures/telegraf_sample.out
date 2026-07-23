@@ -1,0 +1,7 @@
+system,host=adt-201 load1=11.15,load5=10.52,load15=6.95,n_cpus=32i,n_physical_cpus=24i 1784493515000000000
+system,host=adt-201 uptime=24213i 1784493515000000000
+system,host=adt-201 uptime_format="6:43" 1784493515000000000
+cpu,cpu=cpu-total,host=adt-201 usage_user=55.2,usage_system=12.1 1784493525000000000
+cpu,cpu=cpu-total,host=adt-201 usage_user=61.7,usage_system=13.4 1784493535000000000
+not a telegraf line at all
+mem,host=adt-201 used_percent=71.5,available=1.2e+10 1784493525000000000

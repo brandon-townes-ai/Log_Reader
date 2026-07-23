@@ -38,9 +38,9 @@
             </svg>
           </div>
           <p class="dz-label">Drop log files here</p>
-          <p class="dz-sub">or click to browse &mdash; accepts .txt / .log files or a folder</p>
+          <p class="dz-sub">or click to browse &mdash; accepts .txt / .log files, a folder, or a whole bag (subfolders searched)</p>
         </div>
-        <input type="file" id="file-input" accept=".txt,.log" multiple tabindex="-1">
+        <input type="file" id="file-input" accept=".txt,.log,.csv,.jsonl,.out" multiple tabindex="-1">
       </div>
 
       <div id="error-banner" class="error-banner hidden" role="alert">
@@ -79,7 +79,6 @@
     <div class="filter-bar" role="toolbar" aria-label="Log filters">
 
       <div class="filter-group">
-        <span class="filter-label" aria-hidden="true">LEVEL</span>
         <div class="level-pills" id="level-pills" role="group" aria-label="Level filter">
           <button class="pill active" data-level="ALL">ALL</button>
           <button class="pill" data-level="INFO">INFO</button>
@@ -92,7 +91,6 @@
       </div>
 
       <div class="filter-group">
-        <span class="filter-label" aria-hidden="true">PROCESS</span>
         <div class="process-dropdown" id="process-dropdown">
           <button class="dropdown-trigger" id="dropdown-trigger" aria-haspopup="listbox" aria-expanded="false">
             <span id="dropdown-label">All processes</span>
@@ -102,13 +100,7 @@
         </div>
       </div>
 
-      <div class="filter-group">
-        <span class="filter-label" aria-hidden="true">REPEATS</span>
-        <button class="pill" id="collapse-toggle" aria-pressed="false" title="Fold consecutive identical lines">COLLAPSE</button>
-      </div>
-
       <div class="filter-group filter-group--search">
-        <span class="filter-label" aria-hidden="true">SEARCH</span>
         <label class="search-wrap">
           <svg class="search-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
           <input type="search" id="search-input" class="search-input" placeholder="filter… regex ok (word.*num)" autocomplete="off" spellcheck="false">
@@ -117,6 +109,13 @@
           <svg class="search-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
           <input type="search" id="exclude-input" class="search-input" placeholder="exclude… regex" autocomplete="off" spellcheck="false">
         </label>
+      </div>
+
+      <div class="filter-group filter-group--view" role="group" aria-label="View options">
+        <button class="pill" id="collapse-toggle" aria-pressed="false" title="Fold consecutive identical lines">COLLAPSE</button>
+        <button class="pill" id="lanes-toggle" title="Split the timeline into per-process or per-file rows">SPLIT: OFF</button>
+        <button class="pill hidden" id="latency-toggle" aria-pressed="false" title="Per-tag latency statistics">LATENCY</button>
+        <button class="pill hidden" id="signals-toggle" aria-pressed="false" title="Overlay numeric signals on the timeline">SIGNALS</button>
       </div>
 
       <div class="filter-group filter-group--count">
@@ -135,27 +134,50 @@
       </div>
     </div>
 
-    <div class="log-area">
-      <div id="log-container" class="log-container" role="log" aria-label="Log entries">
-        <div id="spacer-top" aria-hidden="true"></div>
-        <div id="log-rows"></div>
-        <div id="spacer-bottom" aria-hidden="true"></div>
-        <div id="empty-msg" class="empty-msg hidden">No matching entries</div>
-      </div>
-      <div id="scroll-markers" class="scroll-markers" aria-hidden="true"></div>
-    </div>
+    <div class="main-area">
 
-    <aside id="inspector" class="inspector hidden" aria-label="Log entry detail">
-      <div class="inspector-resize-handle" id="inspector-resize-handle" aria-hidden="true"></div>
-      <div class="inspector-head">
-        <span class="inspector-title">ENTRY DETAIL</span>
-        <button id="inspector-close" class="theme-toggle" aria-label="Close detail">&times;</button>
+      <div class="log-area">
+        <div id="log-container" class="log-container" role="log" aria-label="Log entries">
+          <div id="spacer-top" aria-hidden="true"></div>
+          <div id="log-rows"></div>
+          <div id="spacer-bottom" aria-hidden="true"></div>
+          <div id="empty-msg" class="empty-msg hidden">No matching entries</div>
+        </div>
+        <div id="scroll-markers" class="scroll-markers" aria-hidden="true"></div>
       </div>
-      <div id="inspector-body" class="inspector-body"></div>
-    </aside>
+
+      <aside id="dock" class="dock hidden" aria-label="Analysis dock">
+        <div id="dock-resize-handle" class="dock-resize-handle" aria-hidden="true"></div>
+        <div class="dock-tabs" role="tablist">
+          <button class="dock-tab" data-tab="inspect" role="tab">INSPECT</button>
+          <button class="dock-tab hidden" data-tab="latency" id="dock-tab-latency" role="tab">LATENCY</button>
+          <button class="dock-tab hidden" data-tab="signals" id="dock-tab-signals" role="tab">SIGNALS</button>
+          <button class="dock-close" id="dock-close" aria-label="Close panel">&times;</button>
+        </div>
+        <div class="dock-body">
+          <div id="dock-inspect" class="dock-pane" role="tabpanel">
+            <div id="inspector-body" class="inspector-body">
+              <div class="insp-empty">Select a log row to see its details.</div>
+            </div>
+          </div>
+          <div id="dock-latency" class="dock-pane" role="tabpanel">
+            <div id="latency-table-wrap" class="dock-table-wrap"></div>
+          </div>
+          <div id="dock-signals" class="dock-pane" role="tabpanel">
+            <div class="sig-search-row">
+              <input type="text" id="signals-search" class="dropdown-search" placeholder="filter signals…" autocomplete="off" spellcheck="false">
+            </div>
+            <div id="signals-table-wrap" class="signals-table-wrap dock-table-wrap"></div>
+          </div>
+        </div>
+      </aside>
+
+    </div>
 
   </div>
 
+  <script src="latency.js"></script>
+  <script src="signals.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

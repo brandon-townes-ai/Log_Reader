@@ -1,0 +1,21 @@
+2026-07-01 10:00:00.100000[planner][INFO][core][main.cc:42] Startup complete
+2026-07-01 10:00:00.200000[planner][INFO][core][plan.cc:88] Planning cycle took 12.3 ms
+2026-07-01 10:00:00.300000[planner][INFO][core][plan.cc:88] Planning cycle took 15.1 ms
+2026-07-01 10:00:00.400000[controller][DEBUG][ctrl][loop.cc:10] control loop latency: 45ms
+2026-07-01 10:00:00.500000[controller][DEBUG][ctrl][loop.cc:10] tick latency=7
+2026-07-01 10:00:00.600000[perception][INFO][lidar][scan.cc:77] scan processing duration=0.012s
+2026-07-01 10:00:00.700000[perception][INFO][lidar][scan.cc:81] cloud registration elapsed 3.4s
+2026-07-01 10:00:00.800000[planner][INFO][replan][replan.cc:5] [LATENCY] tag=planner/replan 850us
+2026-07-01 10:00:00.900000[server][INFO][net][http.cc:31] listening on port 8080
+2026-07-01 10:00:01.000000[server][INFO][net][http.cc:35] retry count = 12
+2026-07-01 10:00:01.100000[driver][WARNING][can][bus.cc:9] bus saturation high
+2026-07-01 10:00:01.200000[driver][ERROR][can][bus.cc:12] send failed
+Traceback (most recent call last):
+  File "bus.py", line 3, in send
+ValueError: timeout
+2026-07-01 10:00:01.300000[driver][FATAL][can][bus.cc:20] giving up
+2026-07-01 10:00:01.400000[misc][ALWAYS][hb][hb.cc:1] heartbeat
+[32m2026-07-01 10:00:01.500000[colorproc][INFO][ansi][color.cc:7] colored line parsed cleanly[0m
+2026-07-01 10:00:01.600000[fusion_detector][INFO][global][fusion_detector_component.cc:88] FusionDetector::callback min: 0.5 ms, avg: 12.5 ms, std: 1.2 ms, max: 40.1 ms, num ticks: 100, total elapsed time: 1.4e+03 ms
+2026-07-01 10:00:01.700000[cloud_supervisor][INFO][global][cloud_supervisor_component.cc:55] Received bedrock latency response: 45 ms.
+2026-07-01 10:00:01.800000[foxglove_bridge][INFO][global][topic_throughput_logger.cc:9] FoxgloveBridge topic throughput: topic=/cloud_supervisor/latency_report window_sec=30 message_count=12 msg_per_sec=0.4

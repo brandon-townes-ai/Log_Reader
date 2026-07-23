@@ -23,7 +23,7 @@ function toggleTheme() {
 applyTheme(localStorage.getItem('log-reader-theme') || 'dark');
 
 // ── Version ──────────────────────────────────────────────────
-const VERSION = 'v1.0.4';
+const VERSION = 'v1.0.5';
 
 // ── Constants ────────────────────────────────────────────────
 const PROCESS_COLORS = [
@@ -59,6 +59,23 @@ let expandedGroups  = new Set();
 let tStart          = 0;      // dataset time bounds (epoch ms)
 let tEnd            = 0;
 let uploadedFiles   = [];
+let latencyStats     = [];    // [{tag, count, mean, p50, p95, max}] from latency.js
+let latencySamples   = [];    // entries with latency_ms, in timestamp order
+let dockTab          = null;  // null | 'inspect' | 'latency' | 'signals' — open dock tab
+let latencySortKey   = 'p95';
+let latencySortDir   = -1;    // -1 desc, 1 asc
+let activeLatencyTag = null;  // string | null
+let selectedEntry    = null;  // entry shown in the inspector (for deep links)
+let pendingHashState = null;  // parsed URL-hash state, applied on next load
+let laneMode         = null;  // null | 'proc' | 'file' — timeline lane rendering
+let clockSkew        = [];    // [{file, offsetMs, tMin, tMax}] flagged by detectClockSkew
+let signalData       = new Map();  // signal name → {t:[], v:[], min, max}
+let signalStats      = [];    // [{name, count, min, mean, max}] for the panel
+let activeSignals    = [];    // names overlaid on the timeline (≤ MAX_ACTIVE_SIGNALS)
+let signalsSortKey   = 'count';
+let signalsSortDir   = -1;
+let signalsFilter    = '';
+let signalsTruncated = false; // a file hit the per-file sample cap
 
 // ── Utilities ────────────────────────────────────────────────
 function hashColor(str) {
@@ -249,6 +266,101 @@ function buildDisplayRows() {
   }
 }
 
+// ── Deep links (URL hash) ────────────────────────────────────
+// The hash encodes view state only — files are local, so a deep link
+// applies once the same bag is dropped again. Keys referencing absent
+// data are silently ignored.
+function serializeHash() {
+  if (!allEntries.length) return;
+  const p = new URLSearchParams();
+  p.set('v', '1');
+  if (activeLevels !== null)    p.set('lv', [...activeLevels].join(','));
+  if (activeProcesses !== null) p.set('pr', [...activeProcesses].map(encodeURIComponent).join(','));
+  const q = document.getElementById('search-input').value;
+  const x = document.getElementById('exclude-input').value;
+  if (q.trim()) p.set('q', q);
+  if (x.trim()) p.set('x', x);
+  if (collapseRepeats) p.set('col', '1');
+  if (rangeStart !== null) {
+    p.set('t0', Math.round(rangeStart));
+    p.set('t1', Math.round(rangeEnd));
+  }
+  if (selectedEntry) p.set('sel', `${encodeURIComponent(selectedEntry.file ?? '')}~${selectedEntry.line_number}`);
+  if (activeLatencyTag !== null) p.set('lat', activeLatencyTag);
+  if (activeSignals.length) p.set('sig', activeSignals.map(encodeURIComponent).join(','));
+  const str = p.toString();
+  history.replaceState(null, '', str === 'v=1' ? location.pathname + location.search : '#' + str);
+}
+
+function parseHash() {
+  if (location.hash.length < 2) return null;
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.get('v') !== '1') return null;
+  const st = {};
+  if (p.has('lv')) st.levels = p.get('lv').split(',').filter(Boolean);
+  if (p.has('pr')) st.processes = p.get('pr').split(',').filter(Boolean).map(decodeURIComponent);
+  if (p.has('q')) st.q = p.get('q');
+  if (p.has('x')) st.x = p.get('x');
+  st.col = p.get('col') === '1';
+  if (p.has('t0') && p.has('t1')) { st.t0 = +p.get('t0'); st.t1 = +p.get('t1'); }
+  if (p.has('sel')) {
+    const raw = p.get('sel'), i = raw.lastIndexOf('~');
+    if (i > -1) st.sel = { file: decodeURIComponent(raw.slice(0, i)), line: +raw.slice(i + 1) };
+  }
+  if (p.has('lat')) st.lat = p.get('lat');
+  if (p.has('sig')) st.sig = p.get('sig').split(',').filter(Boolean).map(decodeURIComponent);
+  return st;
+}
+
+function applyHashState(st) {
+  if (st.levels) {
+    const valid = st.levels.map(canonLevel).filter(lv => lv in LEVEL_COLORS);
+    if (valid.length) { activeLevels = new Set(valid); syncLevelPills(); }
+  }
+  if (st.processes) {
+    const present = new Set(allEntries.map(e => e.process));
+    const valid = st.processes.filter(pr => present.has(pr));
+    if (valid.length) buildProcessDropdown(new Set(valid));
+  }
+  if (st.q) {
+    const input = document.getElementById('search-input');
+    input.value = st.q;
+    searchRegex = compileRegex(st.q, input.closest('.search-wrap'));
+  }
+  if (st.x) {
+    const input = document.getElementById('exclude-input');
+    input.value = st.x;
+    excludeRegex = compileRegex(st.x, input.closest('.search-wrap'));
+  }
+  if (st.col) {
+    collapseRepeats = true;
+    const btn = document.getElementById('collapse-toggle');
+    btn.classList.add('active');
+    btn.setAttribute('aria-pressed', 'true');
+  }
+  if (st.t0 != null && st.t1 != null && st.t1 > st.t0 && st.t0 <= tEnd && st.t1 >= tStart) {
+    rangeStart = Math.max(tStart, st.t0);
+    rangeEnd   = Math.min(tEnd, st.t1);
+    showRangeReadout();
+  }
+  if (st.lat && latencyStats.some(s => s.tag === st.lat)) {
+    activeLatencyTag = st.lat;
+    openDock('latency');
+  }
+  if (st.sig) activeSignals = st.sig.filter(n => signalData.has(n)).slice(0, MAX_ACTIVE_SIGNALS);
+
+  applyFilters();
+
+  if (st.sel) {
+    const idx = displayRows.findIndex(r =>
+      (r.entry.file ?? '') === st.sel.file && r.entry.line_number === st.sel.line);
+    if (idx >= 0) {
+      document.getElementById('log-container').scrollTop = idx * ROW_H;
+      openInspector(displayRows[idx].entry);
+    }
+  }
+}
+
 // ── Filters ──────────────────────────────────────────────────
 function applyFilters() {
   expandedGroups.clear();  // group ids shift when the filtered set changes
@@ -256,6 +368,7 @@ function applyFilters() {
   filteredEntries = allEntries.filter(e => {
     if (activeLevels    !== null && !activeLevels.has(canonLevel(e.level))) return false;
     if (activeProcesses !== null && !activeProcesses.has(e.process))        return false;
+    if (activeLatencyTag !== null && e.latency_tag !== activeLatencyTag)    return false;
     if (rangeStart !== null && (e._t < rangeStart || e._t > rangeEnd))      return false;
     if (searchRegex  && !searchRegex.test(e.raw))  return false;
     if (excludeRegex &&  excludeRegex.test(e.raw)) return false;
@@ -267,6 +380,7 @@ function applyFilters() {
   renderScrollMarkers();
   document.getElementById('log-container').scrollTop = 0;
   renderRows();
+  serializeHash();
 }
 
 function toggleLevel(lv) {
@@ -302,11 +416,148 @@ function fmtDuration(ms) {
   return h ? `${h}h ${m}m ${sec}s` : m ? `${m}m ${sec}s` : `${sec}s`;
 }
 
+// Human-friendly duration for latency values
+function fmtMs(ms) {
+  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+  if (ms >= 1)    return ms.toFixed(ms >= 100 ? 0 : 1) + 'ms';
+  return (ms * 1000).toFixed(0) + 'µs';
+}
+
+// ── Latency panel ────────────────────────────────────────────
+function renderLatencyPanel() {
+  if (dockTab !== 'latency') return;
+
+  const dir = latencySortDir;
+  const rows = [...latencyStats].sort((a, b) => {
+    const va = a[latencySortKey], vb = b[latencySortKey];
+    return (va < vb ? -1 : va > vb ? 1 : 0) * dir;
+  });
+
+  const cols = [['tag','TAG'],['count','COUNT'],['mean','MEAN'],['p50','P50'],['p95','P95'],['max','MAX']];
+  let html = '<table class="latency-table"><thead><tr>';
+  for (const [key, label] of cols) {
+    const arrow = key === latencySortKey ? (dir < 0 ? ' ▾' : ' ▴') : '';
+    html += `<th data-sort="${key}"${key === 'tag' ? ' class="lat-col-tag"' : ''}>${label}${arrow}</th>`;
+  }
+  html += '</tr></thead><tbody>';
+  for (const s of rows) {
+    html += `<tr data-tag="${esc(s.tag)}"${s.tag === activeLatencyTag ? ' class="active"' : ''}>` +
+      `<td class="lat-col-tag">${esc(s.tag)}</td>` +
+      `<td>${s.count.toLocaleString()}</td>` +
+      `<td>${fmtMs(s.mean)}</td><td>${fmtMs(s.p50)}</td><td>${fmtMs(s.p95)}</td><td>${fmtMs(s.max)}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('latency-table-wrap').innerHTML = html;
+}
+
+// ── Signals panel + overlay ──────────────────────────────────
+const SIGNAL_COLORS = ['#38bdf8', '#e879f9', '#4ade80', '#fb923c'];
+const MAX_ACTIVE_SIGNALS = SIGNAL_COLORS.length;
+
+function fmtSigVal(v) {
+  if (!isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 1)   return String(+v.toFixed(2));
+  return v === 0 ? '0' : v.toPrecision(3);
+}
+
+function renderSignalsPanel() {
+  if (dockTab !== 'signals') return;
+
+  const q = signalsFilter.toLowerCase();
+  const rows = signalStats
+    .filter(s => !q || s.name.toLowerCase().includes(q))
+    .sort((a, b) => {
+      const va = a[signalsSortKey], vb = b[signalsSortKey];
+      return (va < vb ? -1 : va > vb ? 1 : 0) * signalsSortDir;
+    });
+
+  const cols = [['name','SIGNAL'],['count','COUNT'],['min','MIN'],['mean','MEAN'],['max','MAX']];
+  let html = '<table class="latency-table"><thead><tr>';
+  for (const [key, label] of cols) {
+    const arrow = key === signalsSortKey ? (signalsSortDir < 0 ? ' ▾' : ' ▴') : '';
+    html += `<th data-sort="${key}"${key === 'name' ? ' class="lat-col-tag"' : ''}>${label}${arrow}</th>`;
+  }
+  html += '</tr></thead><tbody>';
+  for (const s of rows) {
+    const ai = activeSignals.indexOf(s.name);
+    html += `<tr data-sig="${esc(s.name)}"${ai >= 0 ? ' class="active"' : ''}>` +
+      `<td class="lat-col-tag"><span class="sig-dot" style="background:${ai >= 0 ? SIGNAL_COLORS[ai] : 'transparent'}"></span>${esc(s.name)}</td>` +
+      `<td>${s.count.toLocaleString()}</td>` +
+      `<td>${fmtSigVal(s.min)}</td><td>${fmtSigVal(s.mean)}</td><td>${fmtSigVal(s.max)}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('signals-table-wrap').innerHTML = html;
+}
+
+function toggleSignalOverlay(name) {
+  const i = activeSignals.indexOf(name);
+  if (i >= 0) activeSignals.splice(i, 1);
+  else {
+    activeSignals.push(name);
+    if (activeSignals.length > MAX_ACTIVE_SIGNALS) activeSignals.shift();
+  }
+  renderSignalsPanel();
+  renderTimeline();
+  serializeHash();
+}
+
+// Per-pixel min/max strips, each signal normalized to its own [min, max] —
+// units differ, so shapes (spikes, trends) are what's comparable, not scale
+function drawSignalOverlay(ctx, w, h) {
+  if (!activeSignals.length || tEnd <= tStart) return;
+  const span = tEnd - tStart;
+  const nb = Math.max(1, Math.floor(w));
+  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.textBaseline = 'top';
+
+  activeSignals.forEach((name, idx) => {
+    const g = signalData.get(name);
+    if (!g || !g.t.length) return;
+    const color = SIGNAL_COLORS[idx];
+    const range = (g.max - g.min) || 1;
+    const mins = new Float64Array(nb).fill(Infinity);
+    const maxs = new Float64Array(nb).fill(-Infinity);
+    for (let i = 0; i < g.t.length; i++) {
+      let b = Math.floor(((g.t[i] - tStart) / span) * nb);
+      if (b < 0) b = 0; else if (b >= nb) b = nb - 1;
+      const v = g.v[i];
+      if (v < mins[b]) mins[b] = v;
+      if (v > maxs[b]) maxs[b] = v;
+    }
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.9;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < nb; i++) {
+      if (mins[i] === Infinity) continue;
+      const yLo = h - 3 - ((mins[i] - g.min) / range) * (h - 8);
+      const yHi = h - 3 - ((maxs[i] - g.min) / range) * (h - 8);
+      ctx.moveTo(i + 0.5, yLo);
+      ctx.lineTo(i + 0.5, Math.min(yHi, yLo - 1));  // ≥1px so flat stretches stay visible
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+    const label = `${name} [${fmtSigVal(g.min)}…${fmtSigVal(g.max)}]`;
+    const tw = (ctx.measureText(label) || { width: label.length * 6 }).width;
+    ctx.fillText(label, Math.max(4, w - tw - 6), 3 + idx * 10);
+  });
+}
+
+function selectLatencyTag(tag) {
+  activeLatencyTag = activeLatencyTag === tag ? null : tag;
+  renderLatencyPanel();
+  applyFilters();
+  renderTimeline();
+}
+
 // ── Stats Bar ────────────────────────────────────────────────
 function renderStats() {
   const bar = document.getElementById('stats-bar');
   bar.innerHTML = '';
-  if (!allEntries.length) return;
+  if (!allEntries.length && !signalData.size) return;
 
   const levelCounts = {};
   const procCounts  = {};
@@ -327,15 +578,52 @@ function renderStats() {
     if (!first) frag.appendChild(sep());
     first = false;
     const chip = document.createElement('span');
-    chip.className = 'stat-chip stat-chip--level';
-    chip.title = `Filter ${lv}`;
+    chip.className = 'stat-chip';
     chip.innerHTML =
       `<span class="stat-dot" style="background:${LEVEL_COLORS[lv] || '#94a3b8'}"></span>` +
       `<span class="stat-label">${lv}</span>` +
       `<span class="stat-val">${levelCounts[lv].toLocaleString()}</span>`;
-    chip.addEventListener('click', () => toggleLevel(lv));
     frag.appendChild(chip);
   });
+
+  // Latency summary (open via the LATENCY pill)
+  if (latencySamples.length) {
+    frag.appendChild(sep());
+    const lat = document.createElement('span');
+    lat.className = 'stat-chip';
+    lat.innerHTML =
+      `<span class="stat-dot" style="background:var(--cyan)"></span>` +
+      `<span class="stat-label">LAT</span>` +
+      `<span class="stat-val">${latencySamples.length.toLocaleString()} samples · ${latencyStats.length} tags</span>`;
+    frag.appendChild(lat);
+  }
+
+  // Clock-skew warning (inspect via LANES: FILE)
+  if (clockSkew.length) {
+    frag.appendChild(sep());
+    const chip = document.createElement('span');
+    chip.className = 'stat-chip';
+    chip.title = clockSkew.map(s =>
+      `${s.file} starts +${fmtDuration(s.offsetMs)} after the earliest file (${fmtClock(s.tMin)}→${fmtClock(s.tMax)})`
+    ).join('\n');
+    chip.innerHTML =
+      `<span class="stat-label" style="color:${LEVEL_COLORS.WARN}">⚠ CLOCK SKEW</span>` +
+      `<span class="stat-val" style="color:${LEVEL_COLORS.WARN}">${clockSkew.length} file${clockSkew.length > 1 ? 's' : ''}</span>`;
+    frag.appendChild(chip);
+  }
+
+  // Numeric signals summary (open via the SIGNALS pill)
+  if (signalData.size) {
+    frag.appendChild(sep());
+    const sig = document.createElement('span');
+    sig.className = 'stat-chip';
+    sig.title = signalsTruncated ? '⚠ sample cap hit — some samples were dropped' : '';
+    sig.innerHTML =
+      `<span class="stat-dot" style="background:${SIGNAL_COLORS[0]}"></span>` +
+      `<span class="stat-label">SIG</span>` +
+      `<span class="stat-val">${signalData.size.toLocaleString()} signal${signalData.size > 1 ? 's' : ''}${signalsTruncated ? ' ⚠' : ''}</span>`;
+    frag.appendChild(sig);
+  }
 
   // Time span
   frag.appendChild(sep());
@@ -357,9 +645,7 @@ function renderStats() {
       const el = document.createElement('span');
       el.className = 'stat-val stat-proc';
       el.style.color = hashColor(p);
-      el.title = `Filter to ${p}`;
       el.textContent = `${p} ${c.toLocaleString()}`;
-      el.addEventListener('click', () => focusProcess(p));
       noisy.appendChild(el);
       noisy.appendChild(document.createTextNode(' '));
     });
@@ -369,28 +655,29 @@ function renderStats() {
   bar.appendChild(frag);
 }
 
-// Narrow the process filter to a single process (used by stats links)
-function focusProcess(p) {
-  activeProcesses = new Set([p]);
-  const menu = document.getElementById('dropdown-menu');
-  menu.querySelectorAll('input').forEach(c => {
-    c.checked = c.value === '__ALL__' ? false : c.value === p;
-  });
-  syncDropdownLabel();
-  applyFilters();
-}
-
-// ── Timeline histogram ───────────────────────────────────────
+// ── Timeline histogram / lanes ───────────────────────────────
 function renderTimeline() {
   const canvas = document.getElementById('timeline-canvas');
   const barEl  = document.getElementById('timeline-bar');
-  if (!canvas || !barEl || !allEntries.length || tEnd <= tStart) return;
+  if (!canvas || !barEl || (!allEntries.length && !signalData.size) || tEnd <= tStart) return;
+
+  // Lanes mode grows the bar to fit; reset to the CSS default when off
+  const lanes = laneMode !== null && allEntries.length ? computeLanes() : null;
+  barEl.style.height = lanes
+    ? Math.max(56, Math.min(maxLaneBarHeight(), lanes.length * LANE_H + 8)) + 'px'
+    : '';
 
   const w = barEl.clientWidth, h = barEl.clientHeight;
   if (!w || !h) return;
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
+
+  if (lanes) {
+    renderTimelineLanes(ctx, w, h, lanes);
+    drawSignalOverlay(ctx, w, h);
+    return;
+  }
 
   const nb = Math.max(1, Math.floor(w));   // ~1px buckets
   const span = tEnd - tStart;
@@ -426,6 +713,202 @@ function renderTimeline() {
     seg(bk.warn, LEVEL_COLORS.WARN);
     seg(bk.err,  LEVEL_COLORS.ERROR);
   }
+
+  // Latency scatter overlay (log-scale Y) while the latency panel is open
+  if (dockTab === 'latency' && latencySamples.length) {
+    let maxLat = 0;
+    for (const e of latencySamples) if (e.latency_ms > maxLat) maxLat = e.latency_ms;
+    const denom  = Math.log1p(maxLat) || 1;
+    const accent = getComputedStyle(document.documentElement)
+      .getPropertyValue('--accent').trim() || '#f0b429';
+    const baseAlpha = activeLatencyTag === null ? 'aa' : '44';
+    const drawPass = activePass => {
+      ctx.fillStyle = activePass ? accent : accent + baseAlpha;
+      for (const e of latencySamples) {
+        const isActive = activeLatencyTag !== null && e.latency_tag === activeLatencyTag;
+        if (activePass !== isActive) continue;
+        const x = Math.min(w - 2, ((e._t - tStart) / span) * w);
+        const y = h - 2 - (Math.log1p(e.latency_ms) / denom) * (h - 4);
+        ctx.fillRect(x, y, 2, 2);
+      }
+    };
+    drawPass(false);
+    if (activeLatencyTag !== null) drawPass(true);
+    ctx.fillStyle = accent;
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`max ${fmtMs(maxLat)}`, 4, 3);
+  }
+
+  drawSignalOverlay(ctx, w, h);
+}
+
+const MAX_PROC_LANES = 8;  // proc mode: top N by count, rest folded into 'other'
+const LANE_H = 16;         // px per lane — lanes are folded rather than squeezed below this
+
+function maxLaneBarHeight() {
+  return Math.min(300, Math.round(window.innerHeight * 0.38));
+}
+
+function computeLanes() {
+  // Fold the least-active sources into 'other' so every lane keeps ≥LANE_H
+  const maxLanes = Math.max(3, Math.floor((maxLaneBarHeight() - 8) / LANE_H));
+
+  if (laneMode === 'file') {
+    const counts = {};
+    for (const e of allEntries) {
+      const f = e.file ?? '(unknown)';
+      counts[f] = (counts[f] || 0) + 1;
+    }
+    const names = Object.keys(counts).sort();
+    const mk = k => ({ key: k, match: e => (e.file ?? '(unknown)') === k });
+    if (names.length <= maxLanes) return names.map(mk);
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])
+      .slice(0, maxLanes - 1).map(([f]) => f);
+    const topSet = new Set(top);
+    const lanes = top.sort().map(mk);
+    lanes.push({
+      key: `other (${names.length - top.length} files)`,
+      match: e => !topSet.has(e.file ?? '(unknown)'),
+    });
+    return lanes;
+  }
+
+  const counts = {};
+  for (const e of allEntries) counts[e.process] = (counts[e.process] || 0) + 1;
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1])
+    .slice(0, Math.min(MAX_PROC_LANES, maxLanes - 1)).map(([p]) => p);
+  const topSet = new Set(top);
+  const lanes = top.map(p => ({ key: p, match: e => e.process === p }));
+  if (Object.keys(counts).length > top.length) {
+    lanes.push({ key: 'other', match: e => !topSet.has(e.process) });
+  }
+  return lanes;
+}
+
+// Lane labels: strip the boilerplate every bag file shares
+function laneLabel(key) {
+  const s = key.replace(/\.(txt|log)$/i, '').replace(/_stdout$/i, '');
+  return s.length > 38 ? s.slice(0, 37) + '…' : s;
+}
+
+function renderTimelineLanes(ctx, w, h, lanes) {
+  const span  = tEnd - tStart;
+  const nb    = Math.max(1, Math.floor(w));
+  const laneH = h / lanes.length;
+  const css      = getComputedStyle(document.documentElement);
+  const surface  = css.getPropertyValue('--surface').trim() || '#161b22';
+  const labelCol = css.getPropertyValue('--text-dim').trim() || '#8b949e';
+  const divider  = css.getPropertyValue('--border-dim').trim() || '#21262d';
+  ctx.font = '9px "JetBrains Mono", monospace';
+  ctx.textBaseline = 'top';
+
+  lanes.forEach((lane, li) => {
+    const y0 = li * laneH;
+    const buckets = new Array(nb).fill(0);
+    const worst   = new Array(nb).fill(0);  // 0 none, 1 warn, 2 error/fatal
+    let tMin = Infinity, tMax = -Infinity, count = 0;
+
+    for (const e of allEntries) {
+      if (!lane.match(e)) continue;
+      count++;
+      if (e._t < tMin) tMin = e._t;
+      if (e._t > tMax) tMax = e._t;
+      let b = Math.floor(((e._t - tStart) / span) * nb);
+      if (b < 0) b = 0; else if (b >= nb) b = nb - 1;
+      buckets[b]++;
+      const lv = canonLevel(e.level);
+      if (lv === 'ERROR' || lv === 'FATAL') worst[b] = 2;
+      else if (lv === 'WARN' && worst[b] < 1) worst[b] = 1;
+    }
+    if (!count) return;
+
+    let max = 1;
+    for (const c of buckets) if (c > max) max = c;
+    const color = hashColor(lane.key);
+
+    // Faint [tMin, tMax] extent strip — makes clock skew between sources visible
+    const xa = ((tMin - tStart) / span) * w;
+    const xb = ((tMax - tStart) / span) * w;
+    ctx.fillStyle = color + '22';
+    ctx.fillRect(xa, y0 + 1, Math.max(1, xb - xa), laneH - 2);
+
+    // Density strip; WARN/ERROR buckets over-plotted in level colors
+    for (let i = 0; i < nb; i++) {
+      if (!buckets[i]) continue;
+      if (worst[i] === 2)      ctx.fillStyle = LEVEL_COLORS.ERROR;
+      else if (worst[i] === 1) ctx.fillStyle = LEVEL_COLORS.WARN;
+      else {
+        const alpha = Math.round(70 + (buckets[i] / max) * 185).toString(16).padStart(2, '0');
+        ctx.fillStyle = color + alpha;
+      }
+      ctx.fillRect(i, y0 + 2, 1, laneH - 4);
+    }
+
+    // Lane divider
+    ctx.fillStyle = divider;
+    ctx.fillRect(0, Math.round(y0 + laneH) - 1, w, 1);
+
+    // Label on a backing chip: color swatch + theme text, readable over strips
+    if (laneH >= 12) {
+      const label = laneLabel(lane.key);
+      const tw = (ctx.measureText(label) || { width: label.length * 6 }).width;
+      ctx.fillStyle = surface + 'd9';
+      ctx.fillRect(2, y0 + 1, tw + 15, Math.min(13, laneH - 2));
+      ctx.fillStyle = color;
+      ctx.fillRect(4, y0 + 4, 6, 6);
+      ctx.fillStyle = labelCol;
+      ctx.fillText(label, 13, y0 + 3);
+    }
+  });
+}
+
+function setLaneMode(mode) {
+  laneMode = mode;
+  const btn = document.getElementById('lanes-toggle');
+  btn.textContent = 'SPLIT: ' + (mode === null ? 'OFF' : mode === 'proc' ? 'PROCESS' : 'FILE');
+  btn.classList.toggle('active', mode !== null);
+}
+
+function cycleLaneMode() {
+  setLaneMode(laneMode === null ? 'proc' : laneMode === 'proc' ? 'file' : null);
+  renderTimeline();
+}
+
+// ── Clock-skew detection ─────────────────────────────────────
+const SKEW_MIN_OFFSET_MS  = 60_000;  // heuristic: file starts >60s after the earliest…
+const SKEW_MAX_OVERLAP    = 0.5;     // …and overlaps the others' span by <50%
+
+function detectClockSkew(entries) {
+  const files = new Map();  // file → {tMin, tMax}
+  for (const e of entries) {
+    const f = e.file ?? '(unknown)';
+    const cur = files.get(f);
+    if (!cur) files.set(f, { tMin: e._t, tMax: e._t });
+    else {
+      if (e._t < cur.tMin) cur.tMin = e._t;
+      if (e._t > cur.tMax) cur.tMax = e._t;
+    }
+  }
+  if (files.size < 2) return [];
+  const minStart = Math.min(...[...files.values()].map(v => v.tMin));
+  const flagged = [];
+  for (const [f, v] of files) {
+    const offset = v.tMin - minStart;
+    if (offset <= SKEW_MIN_OFFSET_MS) continue;
+    let oMin = Infinity, oMax = -Infinity;
+    for (const [g, u] of files) {
+      if (g === f) continue;
+      if (u.tMin < oMin) oMin = u.tMin;
+      if (u.tMax > oMax) oMax = u.tMax;
+    }
+    const fileSpan = Math.max(1, v.tMax - v.tMin);
+    const overlap  = Math.max(0, Math.min(v.tMax, oMax) - Math.max(v.tMin, oMin));
+    if (overlap / fileSpan < SKEW_MAX_OVERLAP) {
+      flagged.push({ file: f, offsetMs: offset, tMin: v.tMin, tMax: v.tMax });
+    }
+  }
+  return flagged;
 }
 
 function jumpToTime(t) {
@@ -480,6 +963,24 @@ function clearRange() {
   applyFilters();
 }
 
+// Rebuild the .timeline-selection div from rangeStart/rangeEnd — used when
+// a range is restored from a deep link rather than drawn by the mouse.
+function drawRangeSelection() {
+  document.querySelector('.timeline-selection')?.remove();
+  if (rangeStart === null || tEnd <= tStart) return;
+  const bar = document.getElementById('timeline-bar');
+  const w = bar.clientWidth;
+  if (!w) return;
+  const span = tEnd - tStart;
+  const a = ((rangeStart - tStart) / span) * w;
+  const b = ((rangeEnd   - tStart) / span) * w;
+  const el = document.createElement('div');
+  el.className = 'timeline-selection';
+  el.style.left  = Math.min(a, b) + 'px';
+  el.style.width = Math.abs(b - a) + 'px';
+  bar.appendChild(el);
+}
+
 // ── Inspector panel ──────────────────────────────────────────
 function fallbackCopy(text, onSuccess) {
   const ta = document.createElement('textarea');
@@ -504,6 +1005,9 @@ function openInspector(entry) {
   ];
   if (entry.count    != null) metaFields.push(['Count',   entry.count]);
   if (entry.age      != null) metaFields.push(['Age',     entry.age]);
+  if (entry.latency_ms != null) {
+    metaFields.push(['Latency', `${fmtMs(entry.latency_ms)} — ${entry.latency_tag} (${entry.latency_pattern})`]);
+  }
 
   let html = metaFields.map(([k, v]) =>
     `<div class="insp-field"><div class="insp-key">${esc(k)}</div>` +
@@ -541,11 +1045,61 @@ function openInspector(entry) {
     }
   });
 
-  document.getElementById('inspector').classList.remove('hidden');
+  selectedEntry = entry;
+  serializeHash();
+  openDock('inspect');
 }
 
 function closeInspector() {
-  document.getElementById('inspector').classList.add('hidden');
+  if (selectedEntry !== null) {
+    selectedEntry = null;
+    serializeHash();
+  }
+  document.getElementById('inspector-body').innerHTML =
+    '<div class="insp-empty">Select a log row to see its details.</div>';
+  if (dockTab === 'inspect') closeDock();
+}
+
+// ── Analysis dock (INSPECT / LATENCY / SIGNALS tabs) ─────────
+function renderDock() {
+  document.getElementById('dock').classList.toggle('hidden', dockTab === null);
+  document.querySelectorAll('.dock-tab').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.tab === dockTab));
+  document.getElementById('dock-inspect').classList.toggle('active', dockTab === 'inspect');
+  document.getElementById('dock-latency').classList.toggle('active', dockTab === 'latency');
+  document.getElementById('dock-signals').classList.toggle('active', dockTab === 'signals');
+  const latBtn = document.getElementById('latency-toggle');
+  latBtn.classList.toggle('active', dockTab === 'latency');
+  latBtn.setAttribute('aria-pressed', String(dockTab === 'latency'));
+  const sigBtn = document.getElementById('signals-toggle');
+  sigBtn.classList.toggle('active', dockTab === 'signals');
+  sigBtn.setAttribute('aria-pressed', String(dockTab === 'signals'));
+  if (dockTab === 'latency') renderLatencyPanel();
+  if (dockTab === 'signals') renderSignalsPanel();
+}
+
+function openDock(tab) {
+  if (dockTab === tab) return;
+  const latencyVisibilityChanged = (dockTab === 'latency') !== (tab === 'latency');
+  dockTab = tab;
+  renderDock();
+  if (latencyVisibilityChanged) renderTimeline();  // scatter overlay follows the latency tab
+}
+
+function closeDock() {
+  if (dockTab === null) return;
+  const wasLatency = dockTab === 'latency';
+  dockTab = null;
+  renderDock();
+  if (activeLatencyTag !== null) {
+    activeLatencyTag = null;  // dock gone = latency filter gone; no hidden state
+    applyFilters();
+  }
+  if (wasLatency) renderTimeline();
+}
+
+function toggleDockTab(tab) {
+  dockTab === tab ? closeDock() : openDock(tab);
 }
 
 // ── Level Pills ──────────────────────────────────────────────
@@ -559,7 +1113,7 @@ function syncLevelPills() {
 }
 
 // ── Process Dropdown ─────────────────────────────────────────
-function buildProcessDropdown() {
+function buildProcessDropdown(preselected = null) {
   const processes = [...new Set(allEntries.map(e => e.process))].sort();
   const menu      = document.getElementById('dropdown-menu');
   menu.innerHTML  = '';
@@ -585,10 +1139,11 @@ function buildProcessDropdown() {
   });
   menu.appendChild(searchInput);
 
-  menu.appendChild(mkItem('__ALL__', 'All processes'));
+  menu.appendChild(mkItem('__ALL__', 'All processes', preselected === null));
   processes.forEach(p => {
     const color = hashColor(p);
-    const item = mkItem(p, `<span style="color:${color}">${esc(p)}</span>`);
+    const item = mkItem(p, `<span style="color:${color}">${esc(p)}</span>`,
+                        preselected === null || preselected.has(p));
     item.addEventListener('dblclick', () => {
       activeProcesses = new Set([p]);
       menu.querySelectorAll('input').forEach(c => { c.checked = c.value === p; });
@@ -623,7 +1178,7 @@ function buildProcessDropdown() {
     applyFilters();
   });
 
-  activeProcesses = null;
+  activeProcesses = preselected;
   syncDropdownLabel();
 }
 
@@ -644,20 +1199,24 @@ async function handleUpload(files) {
   const worker = new Worker('/parser.worker.js');
   try {
     const allEntries = [];
+    const signalChunks = [];
+    let truncated = false;
     for (const file of uploadedFiles) {
-      const entries = await new Promise((resolve, reject) => {
+      const data = await new Promise((resolve, reject) => {
         worker.onmessage = ({ data }) => {
-          if (data.type === 'done')  resolve(data.entries);
+          if (data.type === 'done')  resolve(data);
           if (data.type === 'error') reject(new Error(data.message));
         };
         worker.onerror = e => reject(new Error(e.message));
         worker.postMessage({ file });
       });
-      for (const e of entries) allEntries.push(e);
+      for (const e of data.entries) { e.file = file.name; allEntries.push(e); }
+      if (data.signals) signalChunks.push(...data.signals);
+      if (data.truncated) truncated = true;
     }
     allEntries.sort((a, b) => a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0);
     showLoading(false);
-    loadViewer(allEntries);
+    loadViewer(allEntries, signalChunks, truncated);
   } catch (err) {
     showLoading(false);
     showError(String(err.message));
@@ -666,17 +1225,55 @@ async function handleUpload(files) {
   }
 }
 
-function loadViewer(entries) {
+function loadViewer(entries, signals = [], truncated = false) {
   // Precompute numeric epoch-ms per entry + dataset bounds (Feature 0)
   for (const e of entries) {
     e._t = Date.parse(e.timestamp.slice(0, 23).replace(' ', 'T'));
   }
-  tStart = entries.length ? entries[0]._t : 0;
-  tEnd   = entries.length ? entries[0]._t : 0;
+
+  // Numeric signals: merge chunks across files, sort by time, compute stats
+  signalData = new Map();
+  for (const s of signals) {
+    let g = signalData.get(s.signal);
+    if (!g) signalData.set(s.signal, g = { t: [], v: [] });
+    for (let i = 0; i < s.t.length; i++) { g.t.push(s.t[i]); g.v.push(s.v[i]); }
+  }
+  signalStats = [];
+  for (const [name, g] of signalData) {
+    let sorted = true;
+    for (let i = 1; i < g.t.length; i++) if (g.t[i] < g.t[i - 1]) { sorted = false; break; }
+    if (!sorted) {
+      const idx = g.t.map((_, i) => i).sort((a, b) => g.t[a] - g.t[b]);
+      g.t = idx.map(i => g.t[i]);
+      g.v = idx.map(i => g.v[i]);
+    }
+    let min = Infinity, max = -Infinity, sum = 0;
+    for (const v of g.v) { if (v < min) min = v; if (v > max) max = v; sum += v; }
+    g.min = min; g.max = max;
+    signalStats.push({ name, count: g.v.length, min, mean: sum / g.v.length, max });
+  }
+  activeSignals    = [];
+  signalsTruncated = truncated;
+  signalsFilter    = '';
+  document.getElementById('signals-search').value = '';
+  document.getElementById('signals-toggle').classList.toggle('hidden', !signalData.size);
+  document.getElementById('dock-tab-signals').classList.toggle('hidden', !signalData.size);
+
+  // dataset bounds — from entries; a signals-only drop falls back to signal range
+  tStart = Infinity;
+  tEnd   = -Infinity;
   for (const e of entries) {
     if (e._t < tStart) tStart = e._t;
     if (e._t > tEnd)   tEnd   = e._t;
   }
+  if (!entries.length) {
+    for (const [, g] of signalData) {
+      if (!g.t.length) continue;
+      if (g.t[0] < tStart)              tStart = g.t[0];
+      if (g.t[g.t.length - 1] > tEnd)   tEnd   = g.t[g.t.length - 1];
+    }
+  }
+  if (!isFinite(tStart)) { tStart = 0; tEnd = 0; }
 
   allEntries      = entries;
   filteredEntries = entries;
@@ -688,6 +1285,18 @@ function loadViewer(entries) {
   collapseRepeats = false;
   expandedGroups.clear();
 
+  setLaneMode(null);
+  clockSkew = detectClockSkew(entries);
+
+  // Latency stats for the dataset
+  latencyStats     = computeLatencyStats(entries);
+  latencySamples   = entries.filter(e => e.latency_ms != null);
+  latencySortKey   = 'p95';
+  latencySortDir   = -1;
+  activeLatencyTag = null;
+  document.getElementById('latency-toggle').classList.toggle('hidden', !latencySamples.length);
+  document.getElementById('dock-tab-latency').classList.toggle('hidden', !latencySamples.length);
+
   // Reset UI
   document.getElementById('search-input').value = '';
   document.getElementById('exclude-input').value = '';
@@ -695,6 +1304,8 @@ function loadViewer(entries) {
   document.getElementById('collapse-toggle').setAttribute('aria-pressed', 'false');
   document.querySelector('.timeline-selection')?.remove();
   showRangeReadout();
+  dockTab = null;
+  renderDock();
   closeInspector();
   syncLevelPills();
   buildProcessDropdown();
@@ -708,6 +1319,12 @@ function loadViewer(entries) {
   document.getElementById('entry-count').textContent =
     `${entries.length.toLocaleString()} entries`;
 
+  // Restore deep-link state (consumed once, on the first load after page open)
+  if (pendingHashState) {
+    applyHashState(pendingHashState);
+    pendingHashState = null;
+  }
+
   showViewer();
 }
 
@@ -715,7 +1332,7 @@ function loadViewer(entries) {
 function showViewer() {
   document.getElementById('upload-screen').classList.remove('active');
   document.getElementById('viewer-screen').classList.add('active');
-  requestAnimationFrame(() => { renderRows(); renderTimeline(); });
+  requestAnimationFrame(() => { renderRows(); renderTimeline(); drawRangeSelection(); });
 }
 
 function showUpload() {
@@ -723,6 +1340,9 @@ function showUpload() {
   document.getElementById('upload-screen').classList.add('active');
   allEntries = filteredEntries = [];
   uploadedFiles = [];
+  signalData = new Map();
+  signalStats = [];
+  activeSignals = [];
 }
 
 function showLoading(on) {
@@ -748,15 +1368,25 @@ function readDirEntries(reader) {
 }
 
 function isLogFile(name) {
-  return name.endsWith('.txt') || name.endsWith('.log');
+  return /\.(txt|log)$/i.test(name);
 }
 
-async function collectTxtFiles(entry) {
+function isSignalFile(name) {
+  return /\.(csv|jsonl|out)$/i.test(name);
+}
+
+function isSupportedFile(name) {
+  return isLogFile(name) || isSignalFile(name);
+}
+
+const MAX_DIR_DEPTH = 5;  // recursion guard — a bag root is logs/ one level down
+
+async function collectTxtFiles(entry, depth = 0) {
   if (entry.isFile) {
-    if (isLogFile(entry.name)) return [await fsEntryToFile(entry)];
+    if (isSupportedFile(entry.name)) return [await fsEntryToFile(entry)];
     return [];
   }
-  if (entry.isDirectory) {
+  if (entry.isDirectory && depth < MAX_DIR_DEPTH && !entry.name.startsWith('.')) {
     const reader = entry.createReader();
     const files = [];
     // readEntries returns ≤100 results per call — loop until empty
@@ -764,9 +1394,7 @@ async function collectTxtFiles(entry) {
       const batch = await readDirEntries(reader);
       if (!batch.length) break;
       for (const child of batch) {
-        if (child.isFile && isLogFile(child.name)) {
-          files.push(await fsEntryToFile(child));
-        }
+        files.push(...await collectTxtFiles(child, depth + 1));
       }
     }
     return files;
@@ -857,6 +1485,7 @@ function initGridCanvas() {
 document.addEventListener('DOMContentLoaded', () => {
   initGridCanvas();
   document.getElementById('version-tag').textContent = VERSION;
+  pendingHashState = parseHash();
 
   const dropZone    = document.getElementById('drop-zone');
   const fileInput   = document.getElementById('file-input');
@@ -953,6 +1582,44 @@ document.addEventListener('DOMContentLoaded', () => {
     renderScrollMarkers();
     logContainer.scrollTop = 0;
     renderRows();
+    serializeHash();
+  });
+
+  // ── Timeline lanes toggle ──
+  document.getElementById('lanes-toggle').addEventListener('click', cycleLaneMode);
+
+  // ── Signals panel: toggle pill, search, sortable headers, row click to overlay ──
+  document.getElementById('signals-toggle').addEventListener('click', () => toggleDockTab('signals'));
+  document.getElementById('signals-search').addEventListener('input', e => {
+    signalsFilter = e.target.value;
+    renderSignalsPanel();
+  });
+  document.getElementById('dock-signals').addEventListener('click', e => {
+    const th = e.target.closest('th[data-sort]');
+    if (th) {
+      const key = th.dataset.sort;
+      if (signalsSortKey === key) signalsSortDir = -signalsSortDir;
+      else { signalsSortKey = key; signalsSortDir = key === 'name' ? 1 : -1; }
+      renderSignalsPanel();
+      return;
+    }
+    const tr = e.target.closest('tr[data-sig]');
+    if (tr) toggleSignalOverlay(tr.dataset.sig);
+  });
+
+  // ── Latency panel: toggle pill, sortable headers, row click to filter ──
+  document.getElementById('latency-toggle').addEventListener('click', () => toggleDockTab('latency'));
+  document.getElementById('dock-latency').addEventListener('click', e => {
+    const th = e.target.closest('th[data-sort]');
+    if (th) {
+      const key = th.dataset.sort;
+      if (latencySortKey === key) latencySortDir = -latencySortDir;
+      else { latencySortKey = key; latencySortDir = key === 'tag' ? 1 : -1; }
+      renderLatencyPanel();
+      return;
+    }
+    const tr = e.target.closest('tr[data-tag]');
+    if (tr) selectLatencyTag(tr.dataset.tag);
   });
 
   // ── Log rows: click to inspect, or expand a collapsed group ──
@@ -972,34 +1639,37 @@ document.addEventListener('DOMContentLoaded', () => {
     if (row) openInspector(row.entry);
   });
 
-  // ── Inspector close ──
-  document.getElementById('inspector-close').addEventListener('click', closeInspector);
+  // ── Dock: tab switching, close, horizontal resize ──
+  document.querySelector('.dock-tabs').addEventListener('click', e => {
+    const tab = e.target.closest('.dock-tab');
+    if (tab) openDock(tab.dataset.tab);
+  });
+  document.getElementById('dock-close').addEventListener('click', closeDock);
 
-  // ── Inspector resize handle ──
-  const inspectorEl = document.getElementById('inspector');
-  const inspectorHandle = document.getElementById('inspector-resize-handle');
-  const INSPECTOR_H_KEY = 'log-reader-inspector-h';
+  const dockEl = document.getElementById('dock');
+  const dockHandle = document.getElementById('dock-resize-handle');
+  const DOCK_H_KEY = 'log-reader-dock-h';
 
-  const savedInspectorH = localStorage.getItem(INSPECTOR_H_KEY);
-  if (savedInspectorH) inspectorEl.style.height = savedInspectorH + 'px';
+  const savedDockH = localStorage.getItem(DOCK_H_KEY);
+  if (savedDockH) dockEl.style.height = savedDockH + 'px';
 
-  inspectorHandle.addEventListener('mousedown', e => {
+  dockHandle.addEventListener('mousedown', e => {
     e.preventDefault();
     const startY = e.clientY;
-    const startH = inspectorEl.offsetHeight;
+    const startH = dockEl.offsetHeight;
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'ns-resize';
 
     const onMove = ev => {
-      const newH = Math.max(80, Math.min(window.innerHeight * 0.8, startH + (startY - ev.clientY)));
-      inspectorEl.style.height = newH + 'px';
+      const newH = Math.max(120, Math.min(window.innerHeight * 0.6, startH + (startY - ev.clientY)));
+      dockEl.style.height = newH + 'px';
     };
-    const onUp = ev => {
+    const onUp = () => {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
-      localStorage.setItem(INSPECTOR_H_KEY, inspectorEl.offsetHeight);
+      localStorage.setItem(DOCK_H_KEY, dockEl.offsetHeight);
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
@@ -1052,10 +1722,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('range-clear').addEventListener('click', clearRange);
 
-  // ── Keyboard: Esc closes inspector / dropdown ──
+  // ── Keyboard: Esc closes dock / dropdown ──
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      closeInspector();
+      closeDock();
       closeDropdown();
     }
   });
