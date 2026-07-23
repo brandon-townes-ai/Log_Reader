@@ -1,4 +1,6 @@
-.PHONY: install run dev deploy clean venv cli test
+.PHONY: install run dev build deploy ship clean venv cli test
+
+TAG ?= latest
 
 venv:
 	test -d venv || python3 -m venv venv
@@ -12,8 +14,13 @@ run: install
 dev: install
 	./venv/bin/uvicorn src.server:app --reload --port 8000
 
+build:
+	docker build -t log-reader:$(TAG) .
+
 deploy:
-	apps-platform app deploy
+	apps-platform app deploy --image log-reader:$(TAG)
+
+ship: build deploy
 
 cli: install
 	./venv/bin/python -m src.cli $(ARGS)

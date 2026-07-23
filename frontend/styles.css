@@ -697,6 +697,23 @@ mark {
 .latency-table tbody tr.active { background: var(--accent-dim); }
 .latency-table tbody tr.active td { color: var(--accent); }
 
+/* ── Faults ─────────────────────────────────────────────────── */
+#faults-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.log-row.fault-fatal { box-shadow: inset 3px 0 0 #ef4444; }
+.log-row.fault-error { box-shadow: inset 3px 0 0 #f87171; }
+.log-row.fault-warn  { box-shadow: inset 3px 0 0 #fbbf24; }
+.latency-table td.flt-code { color: var(--cyan); white-space: nowrap; }
+.latency-table td.flt-detail {
+  color: var(--text-dim);
+  max-width: 460px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── Signals panel ──────────────────────────────────────────── */
 #signals-toggle.active {
   color: var(--accent);

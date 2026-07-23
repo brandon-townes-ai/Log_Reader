@@ -5,3 +5,10 @@ __pycache__
 .gitignore
 *.egg-info
 .env
+venv
+node_modules
+tests
+.pytest_cache
+requirements-dev.txt
+README.md
+Makefile

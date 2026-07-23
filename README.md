@@ -59,6 +59,10 @@ YYYY-MM-DD HH:MM:SS.ffffff[process][LEVEL][module][source] message
 
 Multi-line entries (stack traces, health monitor tables, etc.) are automatically detected and attached to their parent entry. ANSI escape codes are stripped automatically.
 
+### Fault extraction
+
+Diagnostic-system and fault-monitor dumps embedded in ordinary INFO log lines (`ERROR_DISENGAGE | REDSTONE_FAULT_P1_STANDARD | 11871 times | …`, active-fault table rows, `-> SYSTEM_COMMAND_DISENGAGE` transitions) are promoted to structured fault fields at parse time. The FAULTS dock tab auto-opens when a bag contains faults: a deduped, severity-ranked ledger — click a code to filter the log to it (`flt=` in deep links). Faults also render as severity ticks along the top of the timeline and as colored left edges on log rows, since their log level alone (INFO) would hide them. The pattern table lives in `frontend/faults.js` and `src/parser.py` — **the two `FAULT_PATTERNS` tables must stay textually identical**; `tests/test_faults.py` is the oracle. CLI: `python -m src.cli <logs> --faults`.
+
 ### Latency extraction
 
 Messages containing durations (`took 12.3 ms`, `latency: 45ms`, `duration=0.012s`, `[LATENCY] tag=... 850us`, …) are tagged with a normalized `latency_tag` and a unit-normalized `latency_ms` at parse time. The pattern table lives in `frontend/latency.js` (browser) and `src/parser.py` (CLI) — **the two `LATENCY_PATTERNS` tables must stay textually identical**; `tests/test_latency.py` is the oracle when adding a new pattern. View per-tag stats with the LATENCY panel in the UI or `python -m src.cli <logs> --latency`.

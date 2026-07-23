@@ -2,6 +2,7 @@
 
 importScripts('/latency.js');
 importScripts('/signals.js');
+importScripts('/faults.js');
 
 // ── ROS log parser ────────────────────────────────────────────
 const ANSI_RE  = /\x1b\[[0-9;]*[A-Za-z]|\[\d[0-9;]*m/g;
@@ -239,12 +240,15 @@ function parseFaultMonitorText(text) {
 }
 
 // ── Format detection ──────────────────────────────────────────
+// Anchored to line starts: fault-monitor/diagnostic dumps embedded inside
+// ROS-prefixed lines (e.g. execution_manager's process_stdout passthrough)
+// must NOT hijack routing for the whole file.
 function isDiagnosticFormat(text) {
-  return /={10,}\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+={10,}/.test(text.slice(0, 2000));
+  return /^={10,}\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+={10,}/m.test(text.slice(0, 2000));
 }
 
 function isFaultMonitorFormat(text) {
-  return /===== ACTIVE FAULTS =====/.test(text.slice(0, 2000));
+  return /^===== ACTIVE FAULTS =====/m.test(text.slice(0, 2000));
 }
 
 // ── Worker entry point ────────────────────────────────────────
@@ -264,8 +268,15 @@ self.onmessage = async ({ data }) => {
     const entries = isDiagnosticFormat(text)  ? parseDiagText(text)
                 : isFaultMonitorFormat(text) ? parseFaultMonitorText(text)
                 : parseRosText(text);
-    for (const e of entries) extractLatency(e);
-    self.postMessage({ type: 'done', entries, signals: [], truncated: false });
+    for (const e of entries) { extractLatency(e); extractFault(e); }
+    // Stream entries in chunks: structured-cloning a multi-GB log's entries
+    // in one postMessage fails with "Data cannot be cloned, out of memory"
+    const CHUNK = 50000;
+    let i = 0;
+    for (; i + CHUNK < entries.length; i += CHUNK) {
+      self.postMessage({ type: 'chunk', entries: entries.slice(i, i + CHUNK) });
+    }
+    self.postMessage({ type: 'done', entries: entries.slice(i), signals: [], truncated: false });
   } catch (err) {
     self.postMessage({ type: 'error', message: err.message });
   }

@@ -30,8 +30,9 @@ EXPECTED = {
     20: (45.0, "global:Received bedrock latency response: # ms.", "latency_phrase"),
 }
 
-# incl. traps: port 8080, retry count = 12, topic named /latency_report
-NO_LATENCY_LINES = [1, 9, 10, 11, 12, 16, 17, 18, 21]
+# incl. traps: port 8080, retry count = 12, topic named /latency_report,
+# and the fault fixture lines (22-27) which must not extract latency
+NO_LATENCY_LINES = [1, 9, 10, 11, 12, 16, 17, 18, 21, 22, 23, 24, 25, 26, 27]
 
 
 @pytest.mark.parametrize("line", sorted(EXPECTED))

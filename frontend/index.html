@@ -114,6 +114,7 @@
       <div class="filter-group filter-group--view" role="group" aria-label="View options">
         <button class="pill" id="collapse-toggle" aria-pressed="false" title="Fold consecutive identical lines">COLLAPSE</button>
         <button class="pill" id="lanes-toggle" title="Split the timeline into per-process or per-file rows">SPLIT: OFF</button>
+        <button class="pill hidden" id="faults-toggle" aria-pressed="false" title="Deduped fault summary">FAULTS</button>
         <button class="pill hidden" id="latency-toggle" aria-pressed="false" title="Per-tag latency statistics">LATENCY</button>
         <button class="pill hidden" id="signals-toggle" aria-pressed="false" title="Overlay numeric signals on the timeline">SIGNALS</button>
       </div>
@@ -149,12 +150,16 @@
       <aside id="dock" class="dock hidden" aria-label="Analysis dock">
         <div id="dock-resize-handle" class="dock-resize-handle" aria-hidden="true"></div>
         <div class="dock-tabs" role="tablist">
+          <button class="dock-tab hidden" data-tab="faults" id="dock-tab-faults" role="tab">FAULTS</button>
           <button class="dock-tab" data-tab="inspect" role="tab">INSPECT</button>
           <button class="dock-tab hidden" data-tab="latency" id="dock-tab-latency" role="tab">LATENCY</button>
           <button class="dock-tab hidden" data-tab="signals" id="dock-tab-signals" role="tab">SIGNALS</button>
           <button class="dock-close" id="dock-close" aria-label="Close panel">&times;</button>
         </div>
         <div class="dock-body">
+          <div id="dock-faults" class="dock-pane" role="tabpanel">
+            <div id="faults-table-wrap" class="dock-table-wrap"></div>
+          </div>
           <div id="dock-inspect" class="dock-pane" role="tabpanel">
             <div id="inspector-body" class="inspector-body">
               <div class="insp-empty">Select a log row to see its details.</div>
@@ -178,6 +183,7 @@
 
   <script src="latency.js"></script>
   <script src="signals.js"></script>
+  <script src="faults.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
