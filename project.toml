@@ -1,4 +1,5 @@
 name = "log-reader"
+enable_secrets = true
 
 [metadata]
 owner = "brandon.townes@applied.co"

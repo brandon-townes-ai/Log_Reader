@@ -1,0 +1,15 @@
+# Optional: OCI/URSA bag fetch (paste a run-id/link on the site). NOT needed for
+# drag-drop + triage -- the app degrades gracefully when ursa-py is absent.
+#
+# ursa-py is Applied-internal (not on public PyPI). Install from the private index,
+# keeping credentials OUT of git by passing the index at install time:
+#
+#   URSA_PYPI_INDEX="https://<user>:<pass>@ursa.pypi.applied.dev/simple" make install-oci
+#
+# or directly:
+#   ./venv/bin/pip install --extra-index-url "$URSA_PYPI_INDEX" -r requirements-oci.txt
+ursa-py
+
+# Runtime secret loading on apps-platform: the app reads its secrets from GCP
+# Secret Manager at startup (the platform grants access but does not inject env vars).
+google-cloud-secret-manager
